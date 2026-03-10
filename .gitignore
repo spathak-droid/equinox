@@ -1,0 +1,32 @@
+# Secrets & environment
+.envrc
+.env
+.env.*
+*.key
+
+# Caches & databases
+.equinox_cache.db
+.equinox_cache.db-shm
+.equinox_cache.db-wal
+.equinox_embedding_cache.json
+
+# Binaries
+/equinox-ui
+bin/
+*.exe
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Broken directory (curly brace artifact)
+{cmd/

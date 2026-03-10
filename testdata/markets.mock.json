@@ -1,0 +1,67 @@
+{
+  "polymarket": [
+    {
+      "id": "pm-fx-fed-001",
+      "question": "Will the Federal Reserve cut rates by at least 25 basis points before June 30, 2026?",
+      "description": "Outcome resolves to YES if the Federal Reserve lowers the federal funds target by 25 bps or more before June 30, 2026.",
+      "endDateIso": "2026-06-30T23:59:59Z",
+      "outcomePrices": "[\"0.58\", \"0.42\"]",
+      "volume": "120000",
+      "liquidityNum": 30000,
+      "category": "economics",
+      "tags": [
+        {"label": "rates"},
+        {"label": "usa"}
+      ]
+    },
+    {
+      "id": "pm-fx-fed-002",
+      "question": "Will ETH hit $3500 before 2026-09-01?",
+      "description": "Simple price event for ETH.",
+      "endDateIso": "2026-09-01T23:59:59Z",
+      "outcomePrices": "[\"0.32\", \"0.68\"]",
+      "volume": "60000",
+      "liquidityNum": 12000,
+      "category": "crypto",
+      "tags": [
+        {"label": "crypto"}
+      ]
+    }
+  ],
+  "kalshi": [
+    {
+      "ticker": "KX-FED-RATE-2026",
+      "title": "Will the Federal Reserve cut rates by 25 bps or more before June 30, 2026?",
+      "subtitle": "Fed cutoff rule with close date",
+      "category": "economics",
+      "status": "active",
+      "close_time": "2026-06-30T23:59:59Z",
+      "yes_bid": 58,
+      "yes_ask": 60,
+      "no_bid": 40,
+      "no_ask": 42,
+      "volume": 42000,
+      "volume_24h": 28000,
+      "open_interest": 14000,
+      "liquidity": 17000,
+      "rules_html": "<p>Settlement criteria: Fed rate decision by June 30, 2026.</p>"
+    },
+    {
+      "ticker": "KX-ETH-2026",
+      "title": "Will ETH reach $3600 before September 1, 2026?",
+      "subtitle": "Derivative-style close",
+      "category": "crypto",
+      "status": "active",
+      "close_time": "2026-09-01T23:59:59Z",
+      "yes_bid": 35,
+      "yes_ask": 36,
+      "no_bid": 64,
+      "no_ask": 65,
+      "volume": 15000,
+      "volume_24h": 8000,
+      "open_interest": 5000,
+      "liquidity": 9000,
+      "rules_html": "<p>Resolution close event.</p>"
+    }
+  ]
+}
