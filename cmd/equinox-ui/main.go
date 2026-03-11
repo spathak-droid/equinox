@@ -803,15 +803,15 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   <div class="hero-title">Cross-venue market search</div>
   <div class="hero-sub">Find equivalent prediction markets on Polymarket and Kalshi side by side, with routing recommendations.</div>
   <form class="hero-form" method="GET" action="/">
-    <input class="hero-input" type="text" name="q" placeholder="e.g. Bitcoin, Trump, Fed rate..." autofocus>
+    <input class="hero-input" type="text" name="q" placeholder="e.g. 2026 FIFA World Cup, Bitcoin, Fed rate..." autofocus>
     <button class="hero-btn" type="submit">Search</button>
   </form>
   <div class="hero-hints">
-    <a class="hero-hint" href="/?q=Will+Bitcoin+reach+%24100k+by+end+of+year">Will Bitcoin reach $100k by end of year?</a>
-    <a class="hero-hint" href="/?q=Will+Trump+win+the+2028+presidential+election">Will Trump win the 2028 presidential election?</a>
-    <a class="hero-hint" href="/?q=Will+the+Fed+cut+interest+rates+before+July">Will the Fed cut interest rates before July?</a>
-    <a class="hero-hint" href="/?q=Will+the+US+enter+a+recession+in+2026">Will the US enter a recession in 2026?</a>
-    <a class="hero-hint" href="/?q=Will+Ethereum+flip+Bitcoin+in+market+cap">Will Ethereum flip Bitcoin in market cap?</a>
+    <a class="hero-hint" href="/?q=2026+FIFA+World+Cup">2026 FIFA World Cup</a>
+    <a class="hero-hint" href="/?q=2028+US+Presidential+Election">2028 US Presidential Election</a>
+    <a class="hero-hint" href="/?q=Federal+Reserve+rate+cut">Fed rate cut</a>
+    <a class="hero-hint" href="/?q=Bitcoin+price">Bitcoin price</a>
+    <a class="hero-hint" href="/?q=NBA+championship+2025">NBA championship 2025</a>
   </div>
 </div>
 
