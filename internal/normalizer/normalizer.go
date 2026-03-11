@@ -101,6 +101,15 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		marketID = raw.Slug
 	}
 
+	// /markets endpoint provides both liquidityNum (float) and liquidity (string).
+	// Use the numeric field directly; fall back to parsing the string if zero.
+	liquidity := raw.LiquidityNum
+	if liquidity == 0 {
+		liquidity, _ = strconv.ParseFloat(raw.Liquidity, 64)
+	}
+	// volume24hr is already a float in the API; Volume is the all-time string total.
+	volume24h := raw.Volume24hr
+
 	m := &models.CanonicalMarket{
 		ID:               uuid.NewString(),
 		VenueID:          models.VenuePolymarket,
@@ -111,8 +120,8 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		Description:   raw.Description,
 		Category:      models.NormalizeCategory(strings.ToLower(raw.Category)),
 		ImageURL:      raw.Image,
-		Volume24h:     raw.Volume24hr,
-		Liquidity:     raw.LiquidityNum,
+		Volume24h:     volume24h,
+		Liquidity:     liquidity,
 		Status:        models.StatusActive,
 		UpdatedAt:     time.Now(),
 		CreatedAt:     time.Now(),

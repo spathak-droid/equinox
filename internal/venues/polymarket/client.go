@@ -499,7 +499,8 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		return nil, fmt.Errorf("unmarshalling public-search response: %w", err)
 	}
 
-	var result []*venues.RawMarket
+	// Collect slugs and search-level data from public-search results.
+	var entries []searchEntry
 	seen := map[string]struct{}{}
 
 	const maxMarketsPerEvent = 10
@@ -516,49 +517,63 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 				break
 			}
 			seen[mkt.Slug] = struct{}{}
-
-			// Convert outcomePrices array to JSON string for normalizer compatibility
-			// e.g. ["0.935","0.065"] → "[\"0.935\",\"0.065\"]"
-			outcomePricesStr := ""
-			if len(mkt.OutcomePrices) > 0 {
-				b, _ := json.Marshal(mkt.OutcomePrices)
-				outcomePricesStr = string(b)
-			}
-
-			// Build a payload the normalizer's polymarketRaw struct can parse
-			payload := map[string]interface{}{
-				"id":            mkt.Slug, // public-search has no id, use slug
-				"slug":          mkt.Slug,
-				"question":      mkt.Question,
-				"endDateIso":    ev.EndDate,
-				"active":        mkt.Active,
-				"closed":        mkt.Closed,
-				"outcomePrices": outcomePricesStr,
-				"bestBid":       mkt.BestBid,
-				"bestAsk":       mkt.BestAsk,
-				"spread":        mkt.Spread,
-				"image":         ev.Image,
-			}
-
-			b, err := json.Marshal(payload)
-			if err != nil {
-				continue
-			}
-
-			result = append(result, &venues.RawMarket{
-				VenueID:       models.VenuePolymarket,
-				VenueMarketID: mkt.Slug,
-				Payload:       b,
-			})
+			entries = append(entries, searchEntry{mkt: mkt, ev: ev})
 			evCount++
 
-			if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
+			if c.maxMarkets > 0 && len(entries) >= c.maxMarkets {
 				break
 			}
 		}
-		if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
+		if c.maxMarkets > 0 && len(entries) >= c.maxMarkets {
 			break
 		}
+	}
+
+	// Enrich with full market data (liquidity, volume) via batch slug lookup.
+	slugToFull := c.fetchFullBySlug(ctx, entries)
+
+	var result []*venues.RawMarket
+	for _, e := range entries {
+		mkt := e.mkt
+		ev := e.ev
+
+		// Convert outcomePrices array to JSON string for normalizer compatibility
+		outcomePricesStr := ""
+		if len(mkt.OutcomePrices) > 0 {
+			b, _ := json.Marshal(mkt.OutcomePrices)
+			outcomePricesStr = string(b)
+		}
+
+		payload := map[string]interface{}{
+			"id":            mkt.Slug,
+			"slug":          mkt.Slug,
+			"question":      mkt.Question,
+			"endDateIso":    ev.EndDate,
+			"active":        mkt.Active,
+			"closed":        mkt.Closed,
+			"outcomePrices": outcomePricesStr,
+			"bestBid":       mkt.BestBid,
+			"bestAsk":       mkt.BestAsk,
+			"spread":        mkt.Spread,
+			"image":         ev.Image,
+		}
+
+		// Overlay liquidity and volume from full market data if available.
+		if full, ok := slugToFull[mkt.Slug]; ok {
+			payload["liquidityNum"] = full.LiquidityNum
+			payload["volume24hr"] = full.Volume24hr
+		}
+
+		b, err := json.Marshal(payload)
+		if err != nil {
+			continue
+		}
+
+		result = append(result, &venues.RawMarket{
+			VenueID:       models.VenuePolymarket,
+			VenueMarketID: mkt.Slug,
+			Payload:       b,
+		})
 	}
 
 	fmt.Printf("[polymarket] public-search returned %d markets from %d events\n", len(result), len(searchResp.Events))
@@ -568,12 +583,85 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 			break
 		}
 		var p struct {
-			Question string  `json:"question"`
-			BestBid  float64 `json:"bestBid"`
-			BestAsk  float64 `json:"bestAsk"`
+			Question    string  `json:"question"`
+			BestBid     float64 `json:"bestBid"`
+			BestAsk     float64 `json:"bestAsk"`
+			LiquidityNum float64 `json:"liquidityNum"`
 		}
 		json.Unmarshal(r.Payload, &p)
-		fmt.Printf("[polymarket]   [%d] %s (bid=%.3f ask=%.3f)\n", i+1, p.Question, p.BestBid, p.BestAsk)
+		fmt.Printf("[polymarket]   [%d] %s (bid=%.3f ask=%.3f liquidity=$%.0f)\n", i+1, p.Question, p.BestBid, p.BestAsk, p.LiquidityNum)
 	}
 	return result, nil
+}
+
+// searchEntry pairs a public-search market with its parent event metadata.
+type searchEntry struct {
+	mkt publicSearchMarket
+	ev  publicSearchEvent
+}
+
+// fullMarketData holds the financial fields we enrich from /markets?slug=...
+type fullMarketData struct {
+	LiquidityNum float64 `json:"liquidityNum"`
+	Volume24hr   float64 `json:"volume24hr"`
+}
+
+// fetchFullBySlug does a single batch GET /markets?slug=...&slug=... and returns
+// a map of slug → financial data. On any error it returns an empty map so the
+// caller continues with zero-valued liquidity/volume.
+func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map[string]fullMarketData {
+	result := make(map[string]fullMarketData, len(entries))
+	if len(entries) == 0 {
+		return result
+	}
+
+	u := c.baseURL + "/markets?"
+	for i, e := range entries {
+		if i > 0 {
+			u += "&"
+		}
+		u += "slug=" + url.QueryEscape(e.mkt.Slug)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		fmt.Printf("[polymarket] WARNING: fetchFullBySlug: %v\n", err)
+		return result
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		fmt.Printf("[polymarket] WARNING: fetchFullBySlug: %v\n", err)
+		return result
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[polymarket] WARNING: fetchFullBySlug: status %d\n", resp.StatusCode)
+		return result
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return result
+	}
+
+	var markets []struct {
+		Slug         string  `json:"slug"`
+		LiquidityNum float64 `json:"liquidityNum"`
+		Volume24hr   float64 `json:"volume24hr"`
+	}
+	if err := json.Unmarshal(body, &markets); err != nil {
+		fmt.Printf("[polymarket] WARNING: fetchFullBySlug parse: %v\n", err)
+		return result
+	}
+
+	for _, m := range markets {
+		if m.Slug != "" {
+			result[m.Slug] = fullMarketData{LiquidityNum: m.LiquidityNum, Volume24hr: m.Volume24hr}
+		}
+	}
+	fmt.Printf("[polymarket] enriched %d/%d markets with liquidity data\n", len(result), len(entries))
+	return result
 }

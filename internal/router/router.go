@@ -185,36 +185,195 @@ func (r *Router) scoreVenue(m *models.CanonicalMarket, order *Order) *VenueScore
 	return s
 }
 
-// buildExplanation constructs a structured, human-readable routing decision log.
+// buildExplanation constructs a structured, human-readable routing decision log
+// that explains not just the scores but *why* each factor matters for this specific trade.
 func (r *Router) buildExplanation(d *RoutingDecision, scores []*VenueScore) string {
 	var sb strings.Builder
+	order := d.Order
+	winner := d.SelectedVenue
+	var loser *VenueScore
+	for _, s := range scores {
+		if s.Market.VenueID != winner.VenueID {
+			loser = s
+			break
+		}
+	}
+	var winnerScore *VenueScore
+	for _, s := range scores {
+		if s.Market.VenueID == winner.VenueID {
+			winnerScore = s
+			break
+		}
+	}
 
 	sb.WriteString("═══════════════════════════════════════════════════════════\n")
 	sb.WriteString("ROUTING DECISION\n")
 	sb.WriteString("═══════════════════════════════════════════════════════════\n")
-	sb.WriteString(fmt.Sprintf("Order:   %s %s @ $%.2f\n", d.Order.Side, d.Order.EventTitle, d.Order.SizeUSD))
-	sb.WriteString(fmt.Sprintf("Markets: %s / %s\n", d.MatchedPair.MarketA.VenueID, d.MatchedPair.MarketB.VenueID))
-	sb.WriteString(fmt.Sprintf("Match confidence: %s (score=%.3f)\n\n", d.MatchedPair.Confidence, d.MatchedPair.CompositeScore))
 
-	sb.WriteString("Venue scores:\n")
+	// Order context
+	sideLabel := "YES"
+	if order.Side == SideNo {
+		sideLabel = "NO"
+	}
+	sb.WriteString(fmt.Sprintf("Order:   BUY %s on \"%s\" for $%.0f\n", sideLabel, order.EventTitle, order.SizeUSD))
+	sb.WriteString(fmt.Sprintf("Markets: %s vs %s\n", d.MatchedPair.MarketA.VenueID, d.MatchedPair.MarketB.VenueID))
+	sb.WriteString(fmt.Sprintf("Match:   %s (confidence=%.3f)\n", d.MatchedPair.Confidence, d.MatchedPair.CompositeScore))
+
+	// Per-venue breakdown
+	sb.WriteString("\n── Venue Comparison ────────────────────────────────────\n")
 	for _, s := range scores {
+		m := s.Market
 		marker := "  "
-		if s.Market.VenueID == d.SelectedVenue.VenueID {
+		if m.VenueID == winner.VenueID {
 			marker = "▶ "
-		} else {
-			marker = "  "
 		}
-		sb.WriteString(fmt.Sprintf("%s%s\n", marker, s.Explanation))
+
+		// Cost per share
+		var costPerShare float64
+		if order.Side == SideYes {
+			costPerShare = m.YesPrice
+		} else {
+			costPerShare = 1.0 - m.YesPrice
+		}
+		sharesForOrder := 0.0
+		if costPerShare > 0 {
+			sharesForOrder = order.SizeUSD / costPerShare
+		}
+
+		sb.WriteString(fmt.Sprintf("%s[%s] score=%.4f\n", marker, m.VenueID, s.TotalScore))
+		sb.WriteString(fmt.Sprintf("    Price:     %s share costs $%.4f → $%.0f buys ~%.0f shares\n",
+			sideLabel, costPerShare, order.SizeUSD, sharesForOrder))
+		sb.WriteString(fmt.Sprintf("    Liquidity: $%.0f available", m.Liquidity))
+		if m.Liquidity < order.SizeUSD {
+			sb.WriteString(fmt.Sprintf(" ⚠️  NOT enough for $%.0f order (%.0f%% filled)",
+				order.SizeUSD, (m.Liquidity/order.SizeUSD)*100))
+		} else {
+			sb.WriteString(fmt.Sprintf(" ✓ covers $%.0f order fully", order.SizeUSD))
+		}
+		sb.WriteString("\n")
+		if m.Spread == 0 {
+			sb.WriteString("    Spread:    no data (scored neutral)\n")
+		} else {
+			bps := m.Spread * 10000
+			sb.WriteString(fmt.Sprintf("    Spread:    %.4f (%.0f bps)", m.Spread, bps))
+			if m.Spread < 0.005 {
+				sb.WriteString(" — very tight\n")
+			} else if m.Spread < 0.02 {
+				sb.WriteString(" — reasonable\n")
+			} else if m.Spread < 0.05 {
+				sb.WriteString(" — wide\n")
+			} else {
+				sb.WriteString(" — very wide, execution cost will be high\n")
+			}
+		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\nWeights: price=%.0f%% liquidity=%.0f%% spread=%.0f%%\n",
+	// Weights
+	sb.WriteString(fmt.Sprintf("\n── Weights ─────────────────────────────────────────────\n"))
+	sb.WriteString(fmt.Sprintf("   Price=%.0f%%  Liquidity=%.0f%%  Spread=%.0f%%\n",
 		r.cfg.PriceWeight*100, r.cfg.LiquidityWeight*100, r.cfg.SpreadWeight*100))
 
-	sb.WriteString(fmt.Sprintf("\n✅ SELECTED: %s (score=%.4f)\n", d.SelectedVenue.VenueID, d.FinalScore))
-	sb.WriteString(fmt.Sprintf("   Title: %s\n", d.SelectedVenue.Title))
-	sb.WriteString(fmt.Sprintf("   Yes price: %.4f | Liquidity: $%.0f | Spread: %.4f\n",
-		d.SelectedVenue.YesPrice, d.SelectedVenue.Liquidity, d.SelectedVenue.Spread))
+	// Plain-English reasoning
+	sb.WriteString(fmt.Sprintf("\n── Why %s? ─────────────────────────────────────────\n", winner.VenueID))
+
+	reasons := buildReasons(order, winnerScore, loser)
+	for i, reason := range reasons {
+		sb.WriteString(fmt.Sprintf("   %d. %s\n", i+1, reason))
+	}
+
+	// Estimated execution summary
+	var winnerCost float64
+	if order.Side == SideYes {
+		winnerCost = winner.YesPrice
+	} else {
+		winnerCost = 1.0 - winner.YesPrice
+	}
+	winnerShares := 0.0
+	if winnerCost > 0 {
+		winnerShares = order.SizeUSD / winnerCost
+	}
+	potentialPayout := winnerShares * 1.0 // each share pays $1 if correct
+	potentialProfit := potentialPayout - order.SizeUSD
+
+	sb.WriteString(fmt.Sprintf("\n── Estimated Execution ─────────────────────────────────\n"))
+	sb.WriteString(fmt.Sprintf("   Venue:           %s\n", winner.VenueID))
+	sb.WriteString(fmt.Sprintf("   Side:            BUY %s\n", sideLabel))
+	sb.WriteString(fmt.Sprintf("   Cost per share:  $%.4f\n", winnerCost))
+	sb.WriteString(fmt.Sprintf("   Order size:      $%.0f\n", order.SizeUSD))
+	sb.WriteString(fmt.Sprintf("   Shares:          ~%.0f\n", winnerShares))
+	sb.WriteString(fmt.Sprintf("   If correct:      $%.0f payout ($%.0f profit, %.0f%% return)\n",
+		potentialPayout, potentialProfit, (potentialProfit/order.SizeUSD)*100))
+	if winner.Liquidity > 0 && winner.Liquidity < order.SizeUSD {
+		sb.WriteString(fmt.Sprintf("   ⚠️  Warning: only $%.0f liquidity — you may only fill %.0f%% of this order at the quoted price.\n",
+			winner.Liquidity, (winner.Liquidity/order.SizeUSD)*100))
+	}
+
 	sb.WriteString("═══════════════════════════════════════════════════════════\n")
 
 	return sb.String()
+}
+
+// buildReasons generates plain-English explanations for why the winner beat the loser.
+func buildReasons(order *Order, winner, loser *VenueScore) []string {
+	if winner == nil || loser == nil {
+		return []string{"Only one venue available for this market."}
+	}
+
+	var reasons []string
+
+	// Price comparison
+	var winCost, loseCost float64
+	if order.Side == SideYes {
+		winCost = winner.Market.YesPrice
+		loseCost = loser.Market.YesPrice
+	} else {
+		winCost = 1.0 - winner.Market.YesPrice
+		loseCost = 1.0 - loser.Market.YesPrice
+	}
+
+	if winCost < loseCost {
+		saving := loseCost - winCost
+		savingPct := (saving / loseCost) * 100
+		reasons = append(reasons, fmt.Sprintf("Better price: %s shares cost $%.4f vs $%.4f on %s — %.1f%% cheaper per share.",
+			order.Side, winCost, loseCost, loser.Market.VenueID, savingPct))
+	} else if winCost > loseCost {
+		reasons = append(reasons, fmt.Sprintf("Price is slightly worse ($%.4f vs $%.4f on %s), but other factors compensate.",
+			winCost, loseCost, loser.Market.VenueID))
+	} else {
+		reasons = append(reasons, fmt.Sprintf("Price is identical on both venues ($%.4f per share).", winCost))
+	}
+
+	// Liquidity comparison
+	winLiq := winner.Market.Liquidity
+	loseLiq := loser.Market.Liquidity
+	if winLiq > loseLiq*2 && loseLiq < order.SizeUSD {
+		reasons = append(reasons, fmt.Sprintf("Much deeper liquidity: $%.0f vs $%.0f on %s — %s cannot fill a $%.0f order without significant slippage.",
+			winLiq, loseLiq, loser.Market.VenueID, loser.Market.VenueID, order.SizeUSD))
+	} else if winLiq > loseLiq*1.5 {
+		reasons = append(reasons, fmt.Sprintf("More liquidity available: $%.0f vs $%.0f on %s, reducing slippage risk for your $%.0f order.",
+			winLiq, loseLiq, loser.Market.VenueID, order.SizeUSD))
+	} else if loseLiq > winLiq*1.5 {
+		reasons = append(reasons, fmt.Sprintf("Liquidity is lower ($%.0f vs $%.0f on %s), but price advantage outweighs this.",
+			winLiq, loseLiq, loser.Market.VenueID))
+	}
+
+	// Spread comparison
+	winSpread := winner.Market.Spread
+	loseSpread := loser.Market.Spread
+	if winSpread > 0 && loseSpread > 0 {
+		if winSpread < loseSpread*0.5 {
+			reasons = append(reasons, fmt.Sprintf("Tighter spread: %.0f bps vs %.0f bps on %s — lower hidden execution cost.",
+				winSpread*10000, loseSpread*10000, loser.Market.VenueID))
+		} else if loseSpread < winSpread*0.5 {
+			reasons = append(reasons, fmt.Sprintf("Spread is wider (%.0f bps vs %.0f bps on %s), but this is a minor factor at %.0f%% weight.",
+				winSpread*10000, loseSpread*10000, loser.Market.VenueID, 10.0))
+		}
+	}
+
+	if len(reasons) == 0 {
+		reasons = append(reasons, fmt.Sprintf("Scores are close — %s edges out with a marginally better combination of price, liquidity, and spread.",
+			winner.Market.VenueID))
+	}
+
+	return reasons
 }

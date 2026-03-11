@@ -218,14 +218,31 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 
 	if a.SemanticSignature != "" && b.SemanticSignature != "" &&
 		a.SemanticSignature == b.SemanticSignature {
-		result.Confidence = ConfidenceMatch
-		result.CompositeScore = 1.0
-		result.EventMatchScore = 1.0
 		result.SignatureMatch = true
 		result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
+		result.EventMatchScore = 1.0
+
+		// Still apply date penalty — same semantic signature but wildly different
+		// resolution dates (e.g. "before 2027" vs "before 2030") should not match.
+		result.DatePenalty = m.datePenalty(a, b)
+		result.CompositeScore = 1.0 * (1.0 - result.DatePenalty)
+
+		dateSuffix := ""
+		if result.DatePenalty > 0 {
+			dateSuffix = fmt.Sprintf(", date_penalty=%.2f", result.DatePenalty)
+		}
+
+		if result.CompositeScore >= m.cfg.MatchThreshold {
+			result.Confidence = ConfidenceMatch
+		} else if result.CompositeScore >= m.cfg.ProbableMatchThreshold {
+			result.Confidence = ConfidenceProbable
+		} else {
+			result.Confidence = ConfidenceNoMatch
+		}
+
 		result.Explanation = fmt.Sprintf(
-			"Stage 0 signature match: sig=%s (entities=%v, threshold=%s, comparator=%s, date=%s)",
-			a.SemanticSignature, sigA.Entities, sigA.Threshold, sigA.Comparator, sigA.DateRef)
+			"Stage 0 signature match: sig=%s (entities=%v, threshold=%s, comparator=%s, date=%s)%s",
+			a.SemanticSignature, sigA.Entities, sigA.Threshold, sigA.Comparator, sigA.DateRef, dateSuffix)
 		return result
 	}
 

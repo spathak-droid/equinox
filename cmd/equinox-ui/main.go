@@ -442,7 +442,7 @@ func marketVenueLink(m *models.CanonicalMarket) string {
 		if m.VenueEventTicker != "" {
 			return "https://polymarket.com/event/" + url.PathEscape(m.VenueEventTicker) + "/" + url.PathEscape(slug)
 		}
-		return "https://polymarket.com/event/" + url.PathEscape(slug)
+		return "https://polymarket.com/market/" + url.PathEscape(slug)
 	case models.VenueKalshi:
 		return marketVenueKalshiLink(m)
 	default:
@@ -712,7 +712,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 
 /* Expand area */
 .pair-explain { max-height: 0; overflow: hidden; transition: max-height 300ms ease; }
-.pair-explain.is-open { max-height: 500px; }
+.pair-explain.is-open { max-height: 500px; overflow-y: auto; }
 .pair-explain-inner { padding: 10px 12px; border-top: 1px solid var(--border); font-size: 0.73rem; color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; background: rgba(0,0,0,0.15); }
 .pair-explain-section { margin-bottom: 6px; }
 .pair-explain-label { font-size: 0.65rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
@@ -807,11 +807,11 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     <button class="hero-btn" type="submit">Search</button>
   </form>
   <div class="hero-hints">
-    <a class="hero-hint" href="/?q=Bitcoin">Bitcoin</a>
-    <a class="hero-hint" href="/?q=Trump">Trump</a>
-    <a class="hero-hint" href="/?q=Federal+Reserve+rate">Fed rate</a>
-    <a class="hero-hint" href="/?q=2024+election">2024 election</a>
-    <a class="hero-hint" href="/?q=recession">Recession</a>
+    <a class="hero-hint" href="/?q=Will+Bitcoin+reach+%24100k+by+end+of+year">Will Bitcoin reach $100k by end of year?</a>
+    <a class="hero-hint" href="/?q=Will+Trump+win+the+2028+presidential+election">Will Trump win the 2028 presidential election?</a>
+    <a class="hero-hint" href="/?q=Will+the+Fed+cut+interest+rates+before+July">Will the Fed cut interest rates before July?</a>
+    <a class="hero-hint" href="/?q=Will+the+US+enter+a+recession+in+2026">Will the US enter a recession in 2026?</a>
+    <a class="hero-hint" href="/?q=Will+Ethereum+flip+Bitcoin+in+market+cap">Will Ethereum flip Bitcoin in market cap?</a>
   </div>
 </div>
 
@@ -1045,14 +1045,6 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     var venueLink = safe(d.venueLink);
     if (venueLink && venueLink !== "--") {
       links.innerHTML += '<a class="modal-link" href="' + venueLink + '" target="_blank"><span class="material-icons-round">open_in_new</span>Open on ' + safe(d.venue) + '</a>';
-    }
-    var searchLink = safe(d.venueSearchLink);
-    if (searchLink && searchLink !== "--") {
-      links.innerHTML += '<a class="modal-link" href="' + searchLink + '" target="_blank"><span class="material-icons-round">search</span>Search on venue</a>';
-    }
-    var altLink = safe(d.venueSearchLinkAlt);
-    if (altLink && altLink !== "--") {
-      links.innerHTML += '<a class="modal-link" href="' + altLink + '" target="_blank"><span class="material-icons-round">travel_explore</span>Search fallback</a>';
     }
 
     modal.classList.add("is-open");

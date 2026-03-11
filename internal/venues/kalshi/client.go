@@ -33,31 +33,37 @@ type searchResponse struct {
 	CurrentPage       []seriesHit `json:"current_page"`
 }
 
+type productMetadata struct {
+	CustomImageURL string `json:"custom_image_url"` // series-level thumbnail (best quality)
+}
+
 type seriesHit struct {
-	SeriesTicker  string     `json:"series_ticker"`
-	SeriesTitle   string     `json:"series_title"`
-	EventTicker   string     `json:"event_ticker"`
-	EventSubtitle string     `json:"event_subtitle"`
-	EventTitle    string     `json:"event_title"`
-	Category      string     `json:"category"`
-	Tags          []string   `json:"tags"`
-	TotalVolume   int        `json:"total_volume"`
-	Markets       []v1Market `json:"markets"`
+	SeriesTicker    string          `json:"series_ticker"`
+	SeriesTitle     string          `json:"series_title"`
+	EventTicker     string          `json:"event_ticker"`
+	EventSubtitle   string          `json:"event_subtitle"`
+	EventTitle      string          `json:"event_title"`
+	Category        string          `json:"category"`
+	Tags            []string        `json:"tags"`
+	TotalVolume     int             `json:"total_volume"`
+	ProductMetadata productMetadata `json:"product_metadata"`
+	Markets         []v1Market      `json:"markets"`
 }
 
 type v1Market struct {
-	Ticker            string `json:"ticker"`
-	YesBid            int    `json:"yes_bid"`
-	YesAsk            int    `json:"yes_ask"`
-	LastPrice         int    `json:"last_price"`
-	Volume            int    `json:"volume"`
-	CloseTS           string `json:"close_ts"`
-	YesSubtitle       string `json:"yes_subtitle"`
-	NoSubtitle        string `json:"no_subtitle"`
-	Score             int    `json:"score"`
-	PriceDelta        int    `json:"price_delta"`
-	ImageURLLightMode string `json:"image_url_light_mode"`
-	ImageURLDarkMode  string `json:"image_url_dark_mode"`
+	Ticker             string `json:"ticker"`
+	YesBid             int    `json:"yes_bid"`
+	YesAsk             int    `json:"yes_ask"`
+	LastPrice          int    `json:"last_price"`
+	Volume             int    `json:"volume"`
+	CloseTS            string `json:"close_ts"`
+	YesSubtitle        string `json:"yes_subtitle"`
+	NoSubtitle         string `json:"no_subtitle"`
+	Result             string `json:"result"` // "yes", "no", or "" for active
+	Score              int    `json:"score"`
+	PriceDelta         int    `json:"price_delta"`
+	IconURLLightMode   string `json:"icon_url_light_mode"`
+	IconURLDarkMode    string `json:"icon_url_dark_mode"`
 }
 
 // ─── Client ─────────────────────────────────────────────────────────────────
@@ -275,31 +281,42 @@ func flattenHits(hits []seriesHit) []*venues.RawMarket {
 			if _, ok := seen[mkt.Ticker]; ok {
 				continue
 			}
+			// Skip resolved markets
+			if mkt.Result == "yes" || mkt.Result == "no" {
+				continue
+			}
 			if hitCount >= maxMarketsPerSeries {
 				break
 			}
 			seen[mkt.Ticker] = struct{}{}
 
 			// Build a payload the normalizer's kalshiRaw struct can parse.
+			// Prefer the series-level custom image (meaningful thumbnail).
+			// Fall back to the market-level icon only if custom is absent.
+			imageURL := hit.ProductMetadata.CustomImageURL
+			if imageURL == "" {
+				imageURL = mkt.IconURLLightMode
+			}
+
 			payload := map[string]interface{}{
-				"ticker":                mkt.Ticker,
-				"event_ticker":          hit.EventTicker,
-				"series_ticker":         hit.SeriesTicker,
-				"event_title":           hit.EventTitle,
-				"title":                 hit.EventTitle,
-				"subtitle":              mkt.YesSubtitle,
-				"status":                "active",
-				"close_time":            mkt.CloseTS,
-				"yes_bid":               mkt.YesBid,
-				"yes_ask":               mkt.YesAsk,
-				"no_bid":                100 - mkt.YesAsk,
-				"no_ask":                100 - mkt.YesBid,
-				"volume":                mkt.Volume,
-				"volume_24h":            0,
-				"open_interest":         0,
-				"liquidity":             0,
-				"image_url_light_mode":  mkt.ImageURLLightMode,
-				"image_url_dark_mode":   mkt.ImageURLDarkMode,
+				"ticker":               mkt.Ticker,
+				"event_ticker":         hit.EventTicker,
+				"series_ticker":        hit.SeriesTicker,
+				"event_title":          hit.EventTitle,
+				"title":                hit.EventTitle,
+				"subtitle":             mkt.YesSubtitle,
+				"status":               "active",
+				"close_time":           mkt.CloseTS,
+				"yes_bid":              mkt.YesBid,
+				"yes_ask":              mkt.YesAsk,
+				"no_bid":               100 - mkt.YesAsk,
+				"no_ask":               100 - mkt.YesBid,
+				"volume":               mkt.Volume,
+				"volume_24h":           0,
+				"open_interest":        0,
+				"liquidity":            0,
+				"image_url_light_mode": imageURL,
+				"image_url_dark_mode":  mkt.IconURLDarkMode,
 			}
 
 			b, err := json.Marshal(payload)
