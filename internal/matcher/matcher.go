@@ -667,6 +667,8 @@ var genericEntityTokens = map[string]bool{
 
 // disjointSpecificEntities returns true when both titles contain specific named
 // entities but share none of them after removing generic template tokens.
+// Entity synonyms (e.g. "fed" → "federal reserve") are resolved before comparison
+// so that "Fed" and "Federal Reserve" are recognized as the same entity.
 func disjointSpecificEntities(aTitle, bTitle string) bool {
 	aRaw := extractEntities(aTitle)
 	bRaw := extractEntities(bTitle)
@@ -674,14 +676,18 @@ func disjointSpecificEntities(aTitle, bTitle string) bool {
 		return false
 	}
 
+	// Resolve synonyms so "fed" and "federal reserve" overlap correctly.
+	aNorm := normalizeEntities(aRaw)
+	bNorm := normalizeEntities(bRaw)
+
 	aSet := map[string]bool{}
-	for _, e := range aRaw {
+	for _, e := range aNorm {
 		if !genericEntityTokens[e] {
 			aSet[e] = true
 		}
 	}
 	bSet := map[string]bool{}
-	for _, e := range bRaw {
+	for _, e := range bNorm {
 		if !genericEntityTokens[e] {
 			bSet[e] = true
 		}

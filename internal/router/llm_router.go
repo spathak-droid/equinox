@@ -16,6 +16,8 @@ import (
 	"github.com/equinox/internal/matcher"
 )
 
+const maxLLMRespSize = 1 * 1024 * 1024 // 1MB limit for OpenAI API responses
+
 // LLMRouteDecision is a structured routing decision returned by the LLM.
 type LLMRouteDecision struct {
 	SelectedVenue string
@@ -169,7 +171,7 @@ Input:
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxLLMRespSize))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(body))
 	}

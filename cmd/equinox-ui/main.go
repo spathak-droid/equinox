@@ -47,10 +47,12 @@ type cachedResult struct {
 
 // progressEvent is an SSE payload sent during the search pipeline.
 type progressEvent struct {
-	Type  string `json:"type"`            // "step" | "result" | "done" | "error"
-	Msg   string `json:"msg"`
-	Count int    `json:"count,omitempty"` // market / pair count for "result" events
-	Venue string `json:"venue,omitempty"` // "polymarket" | "kalshi" | ""
+	Type  string    `json:"type"`            // "step" | "result" | "pair" | "done" | "error"
+	Msg   string    `json:"msg"`
+	Count int       `json:"count,omitempty"` // market / pair count for "result" events
+	Venue string    `json:"venue,omitempty"` // "polymarket" | "kalshi" | ""
+	Pair  *PairView `json:"pair,omitempty"`  // streamed pair card data
+	Index int       `json:"index,omitempty"` // pair index (1-based)
 }
 
 // PageData is passed to the HTML template.
@@ -237,10 +239,14 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 
 	norm := normalizer.New(cfg)
 	m := matcher.New(cfg)
+	r := router.New(cfg)
 
 	var allPolyMarkets, allKalshiMarkets []*models.CanonicalMarket
 	seenPoly := map[string]bool{}
 	seenKalshi := map[string]bool{}
+	// Track which market pairs have already been emitted to avoid duplicates.
+	emittedPairs := map[string]bool{}
+	pairIndex := 0
 
 	polyOffset := 0
 	kalshiCursor := ""
@@ -328,6 +334,20 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 		fmt.Printf("[equinox-ui] Page %d: pool poly=%d kalshi=%d → %d pairs\n",
 			page, len(allPolyMarkets), len(allKalshiMarkets), len(pairs))
 
+		// Stream any newly discovered pairs
+		for _, p := range pairs {
+			pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID
+			if emittedPairs[pairKey] {
+				continue
+			}
+			emittedPairs[pairKey] = true
+			pairIndex++
+			if pairIndex <= maxDisplayPairs {
+				pv := matchToPairView(cfg, r, p)
+				emit(progressEvent{Type: "pair", Pair: &pv, Index: pairIndex})
+			}
+		}
+
 		// Deep mode can hit venue-side pagination loops that return the same set.
 		// Stop after repeated no-growth pages and switch to query-variant expansion.
 		if deepSearch {
@@ -380,6 +400,19 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 			}
 
 			pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets)
+			// Stream newly discovered pairs from variant expansion
+			for _, p := range pairs {
+				pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID
+				if emittedPairs[pairKey] {
+					continue
+				}
+				emittedPairs[pairKey] = true
+				pairIndex++
+				if pairIndex <= maxDisplayPairs {
+					pv := matchToPairView(cfg, r, p)
+					emit(progressEvent{Type: "pair", Pair: &pv, Index: pairIndex})
+				}
+			}
 			emit(progressEvent{
 				Type:  "result",
 				Msg:   fmt.Sprintf("Expanded pool via %q: +%d poly, +%d kalshi", variant, addedPoly, addedKalshi),
@@ -701,6 +734,31 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	}, nil
 }
 
+// matchToPairView converts a single MatchResult to a PairView with routing.
+func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResult) PairView {
+	order := &router.Order{
+		EventTitle: p.MarketA.Title,
+		Side:       router.SideYes,
+		SizeUSD:    cfg.DefaultOrderSize,
+	}
+	decision := r.Route(order, p)
+	embScore := p.EmbeddingScore
+	if embScore < 0 {
+		embScore = 0
+	}
+	return PairView{
+		MarketA:        toMarketView(p.MarketA),
+		MarketB:        toMarketView(p.MarketB),
+		Confidence:     string(p.Confidence),
+		FuzzyScore:     p.FuzzyScore,
+		EmbeddingScore: embScore,
+		CompositeScore: p.CompositeScore,
+		Explanation:    p.Explanation,
+		SelectedVenue:  string(decision.SelectedVenue.VenueID),
+		RoutingReason:  decision.Explanation,
+	}
+}
+
 // buildDiagnosis generates a human-readable explanation of why no matches were found.
 func buildDiagnosis(venueCounts map[models.VenueID]int, rejected []*matcher.MatchResult) string {
 	polyCount := venueCounts[models.VenuePolymarket]
@@ -914,6 +972,7 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 		}
 		return "K"
 	},
+	"bigVol": func(f float64) bool { return f >= 1000 },
 	"inc": func(i int) int { return i + 1 },
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
@@ -1099,11 +1158,6 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 .live-delta.up { color: var(--green); }
 .live-delta.down { color: var(--red); }
 .live-delta.flat { color: var(--text-muted); }
-.live-chart { width: 100%; height: 120px; display: block; border-radius: 6px; background: linear-gradient(180deg, rgba(129,140,248,0.06), rgba(0,0,0,0)); }
-.live-line { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-.live-line.up { stroke: var(--green); }
-.live-line.down { stroke: var(--red); }
-.live-line.flat { stroke: var(--accent); }
 
 @media (max-width: 768px) {
   .pair-body { grid-template-columns: 1fr; }
@@ -1173,9 +1227,9 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   <div class="hero-hints">
     <a class="hero-hint" href="/?q=2026+FIFA+World+Cup">2026 FIFA World Cup</a>
     <a class="hero-hint" href="/?q=2028+US+Presidential+Election">2028 US Presidential Election</a>
-    <a class="hero-hint" href="/?q=Federal+Reserve+rate+cut">Fed rate cut</a>
+    <a class="hero-hint" href="/?q=Oscars+2026">Oscars 2026</a>
     <a class="hero-hint" href="/?q=Bitcoin+price">Bitcoin price</a>
-    <a class="hero-hint" href="/?q=NBA+championship+2025">NBA championship 2025</a>
+    <a class="hero-hint" href="/?q=NBA+championship+2026">NBA championship 2026</a>
   </div>
 </div>
 
@@ -1253,7 +1307,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         <span class="mkt-stat">Liq <span>{{usd $p.MarketA.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketA.Spread}}{{pct $p.MarketA.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketA.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketA.ResolutionDate}}</span></span>{{end}}
-        {{if $p.MarketA.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketA.Volume24h}}</span></span>{{end}}
+        {{if bigVol $p.MarketA.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketA.Volume24h}}</span></span>{{end}}
       </div>
     </div>
     <div class="market-col clickable-market"
@@ -1278,7 +1332,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         <span class="mkt-stat">Liq <span>{{usd $p.MarketB.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketB.Spread}}{{pct $p.MarketB.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketB.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketB.ResolutionDate}}</span></span>{{end}}
-        {{if $p.MarketB.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketB.Volume24h}}</span></span>{{end}}
+        {{if bigVol $p.MarketB.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketB.Volume24h}}</span></span>{{end}}
       </div>
     </div>
   </div>
@@ -1330,23 +1384,18 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
           <div class="modal-field"><div class="modal-field-label">Resolution Date</div><div class="modal-field-value" id="mdResolutionDate"></div></div>
         </div>
       </div>
-      <div class="modal-section">
+      <div class="modal-section" id="mdLiveSection" style="display:none;">
         <div class="modal-section-title">Live Price</div>
         <div class="live-panel">
           <div class="live-head">
             <div class="live-now" id="mdLiveNow">--</div>
             <div class="live-delta flat" id="mdLiveDelta">--</div>
           </div>
-          <svg id="mdLiveChart" class="live-chart" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="Live price chart">
-            <polyline id="mdLiveLine" class="live-line flat" points=""></polyline>
-          </svg>
         </div>
       </div>
       <div class="modal-section">
-        <div class="modal-section-title">Timestamps</div>
+        <div class="modal-section-title">Resolution</div>
         <div class="modal-grid">
-          <div class="modal-field"><div class="modal-field-label">Created</div><div class="modal-field-value" id="mdCreatedAt"></div></div>
-          <div class="modal-field"><div class="modal-field-label">Updated</div><div class="modal-field-value" id="mdUpdatedAt"></div></div>
           <div class="modal-field full"><div class="modal-field-label">Resolution Criteria</div><div class="modal-field-value" id="mdResolutionCriteria"></div></div>
         </div>
       </div>
@@ -1404,53 +1453,40 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   var fields = {};
   ["mdTitle","mdVenue","mdMarketId","mdStatus","mdDescription","mdTags",
    "mdCategory","mdResolutionDate","mdResolutionCriteria","mdYes",
-   "mdLiquidity","mdSpread","mdCreatedAt","mdUpdatedAt","mdVolume",
+   "mdLiquidity","mdSpread","mdVolume",
    "mdOpenInterest","mdRawPayload","mdLinks","mdImage","mdImageBanner",
-   "mdLiveNow","mdLiveDelta","mdLiveLine"].forEach(function(id) {
+   "mdLiveNow","mdLiveDelta","mdLiveSection"].forEach(function(id) {
     fields[id] = document.getElementById(id);
   });
 
   function safe(v) { return v ? String(v) : "--"; }
   var activeLive = { venue: "", marketId: "" };
 
-  function renderLiveChart(venue, marketId) {
+  function renderLivePrice(venue, marketId) {
     var st = window.__livePriceState;
-    if (!st) return;
+    if (!st) { fields.mdLiveSection.style.display = "none"; return; }
+    var latest = st.latest(venue, marketId);
+    if (latest == null) { fields.mdLiveSection.style.display = "none"; return; }
+    fields.mdLiveSection.style.display = "";
+    fields.mdLiveNow.textContent = (latest * 100).toFixed(1) + "%";
+
     var hist = st.history(venue, marketId);
-    if (!hist.length) {
-      fields.mdLiveNow.textContent = "--";
-      fields.mdLiveDelta.textContent = "--";
+    if (hist.length >= 2) {
+      var first = hist[0].p;
+      var diff = latest - first;
+      var cls = "flat";
+      if (diff > 0.0001) cls = "up";
+      else if (diff < -0.0001) cls = "down";
+      var sign = diff > 0 ? "+" : "";
+      fields.mdLiveDelta.textContent = sign + (diff * 100).toFixed(2) + "%";
+      fields.mdLiveDelta.className = "live-delta " + cls;
+    } else {
+      fields.mdLiveDelta.textContent = "live";
       fields.mdLiveDelta.className = "live-delta flat";
-      fields.mdLiveLine.setAttribute("points", "");
-      fields.mdLiveLine.setAttribute("class", "live-line flat");
-      return;
     }
-
-    var first = hist[0].p;
-    var last = hist[hist.length - 1].p;
-    fields.mdLiveNow.textContent = (last * 100).toFixed(2) + "%";
-    var diff = last - first;
-    var cls = "flat";
-    if (diff > 0.0001) cls = "up";
-    else if (diff < -0.0001) cls = "down";
-    var sign = diff > 0 ? "+" : "";
-    fields.mdLiveDelta.textContent = sign + (diff * 100).toFixed(2) + "%";
-    fields.mdLiveDelta.className = "live-delta " + cls;
-
-    var min = hist[0].p, max = hist[0].p;
-    hist.forEach(function(pt) { if (pt.p < min) min = pt.p; if (pt.p > max) max = pt.p; });
-    if (max-min < 0.0001) { max += 0.0001; min -= 0.0001; }
-    var w = 600, h = 120;
-    var pts = hist.map(function(pt, i) {
-      var x = (hist.length <= 1) ? 0 : (i * (w / (hist.length - 1)));
-      var y = h - ((pt.p - min) / (max - min)) * (h - 8) - 4;
-      return x.toFixed(1) + "," + y.toFixed(1);
-    }).join(" ");
-    fields.mdLiveLine.setAttribute("points", pts);
-    fields.mdLiveLine.setAttribute("class", "live-line " + cls);
   }
 
-  function showMarketModal(card) {
+  window.showMarketModal = function(card) {
     var d = card.dataset;
     fields.mdTitle.textContent = safe(d.title);
     fields.mdVenue.textContent = safe(d.venue);
@@ -1461,8 +1497,6 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     fields.mdCategory.textContent = safe(d.category);
     fields.mdResolutionDate.textContent = safe(d.resolutionDate);
     fields.mdResolutionCriteria.textContent = safe(d.resolutionCriteria);
-    fields.mdCreatedAt.textContent = safe(d.createdAt);
-    fields.mdUpdatedAt.textContent = safe(d.updatedAt);
     fields.mdVolume.textContent = safe(d.volume24h);
     fields.mdOpenInterest.textContent = safe(d.openInterest);
     fields.mdYes.textContent = safe(d.yes);
@@ -1475,7 +1509,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     if (window.__livePriceState && isFinite(initYes)) {
       window.__livePriceState.publish(activeLive.venue, activeLive.marketId, initYes);
     }
-    renderLiveChart(activeLive.venue, activeLive.marketId);
+    renderLivePrice(activeLive.venue, activeLive.marketId);
 
     var imgUrl = d.imageUrl || "";
     if (imgUrl) {
@@ -1508,7 +1542,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   }
 
   document.querySelectorAll(".clickable-market").forEach(function(card) {
-    card.addEventListener("click", function() { showMarketModal(card); });
+    card.addEventListener("click", function() { window.showMarketModal(card); });
   });
 
   window.closeMarketModal = function() {
@@ -1541,7 +1575,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   window.addEventListener("equinox-price-tick", function() {
     if (!activeLive.venue || !activeLive.marketId) return;
     if (!modal.classList.contains("is-open")) return;
-    renderLiveChart(activeLive.venue, activeLive.marketId);
+    renderLivePrice(activeLive.venue, activeLive.marketId);
   });
 })();
 
@@ -1685,14 +1719,17 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   ws.onerror = function() {};
 })();
 
-/* ── SSE search loader ───────────────────────────────────── */
+/* ── SSE search loader with incremental pair streaming ──── */
 (function() {
   var content = document.querySelector(".content");
 
-  function showLoader(q) {
+  function showStreamUI(q) {
     content.innerHTML =
-      '<div class="search-loader">' +
-        '<div class="loader-query">Searching for <em>' + escHtml(q) + '</em></div>' +
+      '<div class="results-header" id="streamHeader">' +
+        '<div class="results-title"><span class="material-icons-round" style="font-size:14px;vertical-align:middle;animation:loaderSpin 0.9s linear infinite;margin-right:4px;">sync</span> Searching for <strong>"' + escHtml(q) + '"</strong></div>' +
+      '</div>' +
+      '<div id="streamPairs"></div>' +
+      '<div class="search-loader" id="streamLoader" style="margin-top:16px;">' +
         '<div class="loader-log" id="loaderLog"></div>' +
       '</div>';
   }
@@ -1725,10 +1762,133 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     return '<span class="loader-count">' + n + '</span>';
   }
 
+  function fmtPct(f) { return (f * 100).toFixed(1) + "%"; }
+  function fmtScore(f) { return f.toFixed(3); }
+  function fmtScoreWidth(f) { return (f * 100).toFixed(1) + "%"; }
+  function fmtUsd(f) {
+    if (!f) return "--";
+    if (f >= 1000000) return "$" + (f / 1000000).toFixed(1) + "M";
+    if (f >= 1000) return "$" + (f / 1000).toFixed(1) + "K";
+    return "$" + Math.round(f);
+  }
+  function confClass(c) { return c === "MATCH" ? "conf-match" : c === "PROBABLE_MATCH" ? "conf-probable" : "conf-no"; }
+  function cardClass(c) { return c === "MATCH" ? "card-match" : c === "PROBABLE_MATCH" ? "card-probable" : ""; }
+  function confIcon(c) { return c === "MATCH" ? "check_circle" : c === "PROBABLE_MATCH" ? "help" : "cancel"; }
+  function venueClass(v) { return v === "polymarket" ? "venue-poly" : "venue-kalshi"; }
+  function venueIcon(v) { return v === "polymarket" ? "P" : "K"; }
+
+  function mktDataAttrs(m) {
+    return ' data-venue="' + escHtml(m.venue) + '"' +
+      ' data-market-id="' + escHtml(m.venue_market_id) + '"' +
+      ' data-title="' + escHtml(m.title) + '"' +
+      ' data-description="' + escHtml(m.description) + '"' +
+      ' data-category="' + escHtml(m.category) + '"' +
+      ' data-tags="' + escHtml(m.tags) + '"' +
+      ' data-status="' + escHtml(m.status) + '"' +
+      ' data-yes="' + (m.yes_price || 0).toFixed(6) + '"' +
+      ' data-token-id="' + escHtml(m.venue_yes_token_id || "") + '"' +
+      ' data-liquidity="' + (m.liquidity || 0).toFixed(2) + '"' +
+      ' data-spread="' + (m.spread || 0).toFixed(6) + '"' +
+      ' data-resolution-date="' + escHtml(m.resolution_date) + '"' +
+      ' data-created-at="' + escHtml(m.created_at) + '"' +
+      ' data-updated-at="' + escHtml(m.updated_at) + '"' +
+      ' data-volume24h="' + (m.volume_24h || 0).toFixed(2) + '"' +
+      ' data-open-interest="' + (m.open_interest || 0).toFixed(2) + '"' +
+      ' data-resolution-criteria="' + escHtml(m.resolution_raw) + '"' +
+      ' data-venue-link="' + escHtml(m.venue_link) + '"' +
+      ' data-venue-search-link="' + escHtml(m.venue_search_link) + '"' +
+      ' data-venue-search-link-alt="' + escHtml(m.venue_search_link_alt) + '"' +
+      ' data-image-url="' + escHtml(m.image_url) + '"' +
+      ' data-payload="' + escHtml(m.raw_payload_b64) + '"';
+  }
+
+  function renderMktCol(m) {
+    var thumb = m.image_url ? '<img class="mkt-thumb" src="' + escHtml(m.image_url) + '" alt="" loading="lazy">' : '';
+    return '<div class="market-col clickable-market"' + mktDataAttrs(m) + '>' +
+      '<div class="mkt-header">' +
+        thumb +
+        '<div class="venue-dot vd-' + escHtml(m.venue) + '">' + venueIcon(m.venue) + '</div>' +
+        '<div class="mkt-title">' + escHtml(m.title) + '</div>' +
+      '</div>' +
+      '<div class="mkt-stats">' +
+        '<span class="mkt-price" data-venue="' + escHtml(m.venue) + '" data-market-id="' + escHtml(m.venue_market_id) + '" data-token-id="' + escHtml(m.venue_yes_token_id || "") + '">' + fmtPct(m.yes_price || 0) + '</span>' +
+        '<span class="mkt-stat">Liq <span>' + fmtUsd(m.liquidity) + '</span></span>' +
+        '<span class="mkt-stat">Spread <span>' + (m.spread ? fmtPct(m.spread) : "--") + '</span></span>' +
+        (m.resolution_date ? '<span class="mkt-stat">Res <span>' + escHtml(m.resolution_date) + '</span></span>' : '') +
+        (m.volume_24h >= 1000 ? '<span class="mkt-stat">24h <span>' + fmtUsd(m.volume_24h) + '</span></span>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderPairCard(p, idx) {
+    return '<div class="pair-card ' + cardClass(p.confidence) + '" id="pair-' + idx + '" style="opacity:0;transform:translateY(16px);transition:opacity 400ms ease,transform 400ms ease;">' +
+      '<div class="pair-head">' +
+        '<div class="pair-index">' + (idx + 1) + '</div>' +
+        '<div class="conf-badge ' + confClass(p.confidence) + '">' +
+          '<span class="material-icons-round">' + confIcon(p.confidence) + '</span> ' +
+          escHtml(p.confidence) +
+        '</div>' +
+        '<div class="head-separator"></div>' +
+        '<div class="score-pills">' +
+          '<div class="score-pill">Fuzzy <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.fuzzy_score) + '"></div></div> <strong>' + fmtScore(p.fuzzy_score) + '</strong></div>' +
+          '<div class="score-pill">Embed <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.embedding_score) + '"></div></div> <strong>' + fmtScore(p.embedding_score) + '</strong></div>' +
+          '<div class="score-pill">Composite <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.composite_score) + '"></div></div> <strong>' + fmtScore(p.composite_score) + '</strong></div>' +
+        '</div>' +
+        '<div class="head-spacer"></div>' +
+        '<div class="route-chip">' +
+          '<span class="material-icons-round">arrow_forward</span>' +
+          '<span class="rv ' + venueClass(p.selected_venue) + '">' + escHtml(p.selected_venue) + '</span>' +
+        '</div>' +
+        '<button class="expand-btn" onclick="toggleExplain(this, \'explain-s' + idx + '\')">' +
+          '<span class="material-icons-round">expand_more</span>' +
+        '</button>' +
+      '</div>' +
+      '<div class="pair-body">' +
+        renderMktCol(p.market_a) +
+        renderMktCol(p.market_b) +
+      '</div>' +
+      '<div class="pair-explain" id="explain-s' + idx + '">' +
+        '<div class="pair-explain-inner">' +
+          '<div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>' + escHtml(p.explanation) + '</div>' +
+          '<div class="pair-explain-section"><div class="pair-explain-label">Routing decision</div>' + escHtml(p.routing_reason) + '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function bindClickableMarkets(container) {
+    container.querySelectorAll(".clickable-market").forEach(function(card) {
+      card.addEventListener("click", function() {
+        if (typeof showMarketModal === "function") showMarketModal(card);
+      });
+    });
+  }
+
   function startStreamSearch(q, deepSearch) {
-    showLoader(q);
+    showStreamUI(q);
     var target = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
     history.pushState(null, "", target);
+    var pairsContainer = document.getElementById("streamPairs");
+    var matchCount = 0;
+    var probableCount = 0;
+    var pairCount = 0;
+
+    var searchDone = false;
+    function updateHeader() {
+      var header = document.getElementById("streamHeader");
+      if (!header) return;
+      var html = '';
+      if (searchDone) {
+        html = '<div class="results-title">Results for <strong>"' + escHtml(q) + '"</strong></div>';
+      } else if (pairCount > 0) {
+        html = '<div class="results-title"><span class="material-icons-round" style="font-size:14px;vertical-align:middle;animation:loaderSpin 0.9s linear infinite;margin-right:4px;">sync</span> Finding matches for <strong>"' + escHtml(q) + '"</strong></div>';
+      } else {
+        html = '<div class="results-title"><span class="material-icons-round" style="font-size:14px;vertical-align:middle;animation:loaderSpin 0.9s linear infinite;margin-right:4px;">sync</span> Searching for <strong>"' + escHtml(q) + '"</strong></div>';
+      }
+      if (matchCount) html += '<span class="result-badge badge-match">' + matchCount + ' matched</span>';
+      if (probableCount) html += '<span class="result-badge badge-probable">' + probableCount + ' probable</span>';
+      header.innerHTML = html;
+    }
 
     var es = new EventSource("/stream?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : ""));
     es.onmessage = function(e) {
@@ -1740,9 +1900,45 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
           var extra = venueTag(evt.venue);
           if (evt.count > 0) extra = countBadge(evt.count) + (evt.venue ? venueTag(evt.venue) : "");
           addLine("loader-result", "ok", "✓", evt.msg, extra);
+        } else if (evt.type === "pair" && evt.pair) {
+          var idx = pairCount;
+          pairCount++;
+          if (evt.pair.confidence === "MATCH") matchCount++;
+          else if (evt.pair.confidence === "PROBABLE_MATCH") probableCount++;
+          // Hide the loader log once the first pair arrives
+          if (pairCount === 1) {
+            var loader = document.getElementById("streamLoader");
+            if (loader) loader.style.display = "none";
+          }
+          var cardHtml = renderPairCard(evt.pair, idx);
+          var div = document.createElement("div");
+          div.innerHTML = cardHtml;
+          var card = div.firstChild;
+          pairsContainer.appendChild(card);
+          bindClickableMarkets(card);
+          requestAnimationFrame(function() {
+            card.style.opacity = "1";
+            card.style.transform = "translateY(0)";
+          });
+          updateHeader();
         } else if (evt.type === "done") {
           es.close();
-          window.location.href = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
+          searchDone = true;
+          var loader = document.getElementById("streamLoader");
+          if (loader) {
+            if (pairCount === 0) {
+              // Move empty state above (replace loader area)
+              loader.innerHTML =
+                '<div class="empty-state">' +
+                  '<div class="empty-icon material-icons-round">search_off</div>' +
+                  '<div class="empty-title">No equivalent pairs found</div>' +
+                  '<div class="empty-sub">Try a different search query, or adjust MATCH_THRESHOLD / MAX_DATE_DELTA_DAYS to widen the match window.</div>' +
+                '</div>';
+            } else {
+              loader.style.display = "none";
+            }
+          }
+          updateHeader();
         } else if (evt.type === "error") {
           es.close();
           addLine("loader-result", "warn", "!", evt.msg, "");
@@ -1751,7 +1947,18 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     };
     es.onerror = function() {
       es.close();
-      window.location.href = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
+      var loader = document.getElementById("streamLoader");
+      if (loader && pairCount === 0) {
+        loader.innerHTML =
+          '<div class="empty-state">' +
+            '<div class="empty-icon material-icons-round">error_outline</div>' +
+            '<div class="empty-title">Connection lost</div>' +
+            '<div class="empty-sub">The search was interrupted. Please try again.</div>' +
+          '</div>';
+      } else if (loader) {
+        loader.style.display = "none";
+      }
+      updateHeader();
     };
   }
 

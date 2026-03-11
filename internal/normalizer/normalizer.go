@@ -126,8 +126,6 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		Volume24h:     volume24h,
 		Liquidity:     liquidity,
 		Status:        models.StatusActive,
-		UpdatedAt:     time.Now(),
-		CreatedAt:     time.Now(),
 		RawPayload:    r.Payload,
 	}
 
@@ -250,8 +248,6 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		Liquidity:     estimateKalshiLiquidity(raw),
 		Status:        models.StatusActive,
 		ImageURL:      raw.ImageURLLight,
-		UpdatedAt:     time.Now(),
-		CreatedAt:     time.Now(),
 		RawPayload:    r.Payload,
 	}
 

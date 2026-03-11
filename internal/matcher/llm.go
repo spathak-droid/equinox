@@ -35,6 +35,8 @@ const (
 	LLMDecisionMatch   LLMDecision = "match"
 	LLMDecisionNoMatch LLMDecision = "no_match"
 	LLMDecisionUnsure  LLMDecision = "unsure"
+
+	maxLLMRespSize = 1 * 1024 * 1024 // 1MB limit for OpenAI API responses
 )
 
 // LLMJudgment is the raw model decision for one source/candidate pair.
@@ -225,7 +227,7 @@ It is much better to miss a true match than to falsely match two different quest
 		if err != nil {
 			return nil, fmt.Errorf("openai request: %w", err)
 		}
-		respBody, err = io.ReadAll(resp.Body)
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, maxLLMRespSize))
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("reading response: %w", err)

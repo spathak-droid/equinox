@@ -18,6 +18,30 @@ import (
 	"github.com/equinox/internal/models"
 )
 
+// tokenJaccard computes word-level Jaccard similarity between two strings
+// WITHOUT stopword removal. This is used for quick pre-filtering where we want
+// raw token overlap rather than the semantic-aware keywordJaccard from matcher.go.
+func tokenJaccard(a, b string) float64 {
+	wa := strings.Fields(strings.ToLower(a))
+	wb := strings.Fields(strings.ToLower(b))
+	setA := make(map[string]bool, len(wa))
+	for _, w := range wa {
+		setA[w] = true
+	}
+	inter, union := 0, len(setA)
+	for _, w := range wb {
+		if setA[w] {
+			inter++
+		} else {
+			union++
+		}
+	}
+	if union == 0 {
+		return 0
+	}
+	return float64(inter) / float64(union)
+}
+
 // SearchCandidate pairs a source market with candidate matches found via search.
 type SearchCandidate struct {
 	Source     *models.CanonicalMarket
@@ -362,34 +386,13 @@ func (m *Matcher) fuzzyFallback(ctx context.Context, searchResults []SearchResul
 
 	// For each poly market, find its best kalshi match by Jaccard title similarity.
 	// This mirrors the query-based pre-filter but without a query.
-	jaccard := func(a, b string) float64 {
-		wa := strings.Fields(strings.ToLower(a))
-		wb := strings.Fields(strings.ToLower(b))
-		setA := make(map[string]bool, len(wa))
-		for _, w := range wa {
-			setA[w] = true
-		}
-		inter, union := 0, len(setA)
-		for _, w := range wb {
-			if setA[w] {
-				inter++
-			} else {
-				union++
-			}
-		}
-		if union == 0 {
-			return 0
-		}
-		return float64(inter) / float64(union)
-	}
-
 	var confirmed []*MatchResult
 	for _, poly := range polyMarkets {
 		// Pick best kalshi candidate by Jaccard, then run full rule-based compare
 		var bestK *models.CanonicalMarket
 		bestSim := -1.0
 		for _, k := range kalshiMarkets {
-			if sim := jaccard(poly.Title, k.Title); sim > bestSim {
+			if sim := tokenJaccard(poly.Title, k.Title); sim > bestSim {
 				bestSim = sim
 				bestK = k
 			}
@@ -399,7 +402,7 @@ func (m *Matcher) fuzzyFallback(ctx context.Context, searchResults []SearchResul
 		}
 		result := m.compare(poly, bestK)
 		if result.Confidence == ConfidenceMatch ||
-			(result.Confidence == ConfidenceProbable && result.CompositeScore >= m.cfg.MatchThreshold) {
+			(result.Confidence == ConfidenceProbable && result.CompositeScore >= m.cfg.ProbableMatchThreshold) {
 			confirmed = append(confirmed, result)
 		}
 	}
@@ -437,8 +440,8 @@ func (m *Matcher) CrossPollinateJaccard(polyMarkets, kalshiMarkets []*models.Can
 			if r.Confidence == ConfidenceNoMatch {
 				continue
 			}
-			// Keep PROBABLE only when it clears the strict match threshold.
-			if r.Confidence == ConfidenceProbable && r.CompositeScore < m.cfg.MatchThreshold {
+			// Keep PROBABLE matches that clear the probable threshold.
+			if r.Confidence == ConfidenceProbable && r.CompositeScore < m.cfg.ProbableMatchThreshold {
 				continue
 			}
 			candidates = append(candidates, r)
@@ -488,31 +491,10 @@ func topPairsByJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket, k i
 		sim    float64
 	}
 
-	jaccard := func(a, b string) float64 {
-		wa := strings.Fields(strings.ToLower(a))
-		wb := strings.Fields(strings.ToLower(b))
-		set := make(map[string]bool, len(wa))
-		for _, w := range wa {
-			set[w] = true
-		}
-		inter, union := 0, len(set)
-		for _, w := range wb {
-			if set[w] {
-				inter++
-			} else {
-				union++
-			}
-		}
-		if union == 0 {
-			return 0
-		}
-		return float64(inter) / float64(union)
-	}
-
 	var all []pair
 	for _, p := range polyMarkets {
 		for _, k := range kalshiMarkets {
-			all = append(all, pair{p, k, jaccard(p.Title, k.Title)})
+			all = append(all, pair{p, k, tokenJaccard(p.Title, k.Title)})
 		}
 	}
 

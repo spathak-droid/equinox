@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	baseURL  = "https://gamma-api.polymarket.com"
-	pageSize = 100
+	baseURL        = "https://gamma-api.polymarket.com"
+	pageSize       = 100
+	maxRespSize    = 10 * 1024 * 1024 // 10MB limit for venue API responses
 )
 
 // Client is a Polymarket Gamma API client.
@@ -109,82 +110,11 @@ var polymarketTagSlugs = map[string]string{
 // /events?tag_slug=... endpoint. Each event may contain multiple markets;
 // they are flattened into individual RawMarket entries.
 func (c *Client) FetchMarketsByCategory(ctx context.Context, category string) ([]*venues.RawMarket, error) {
-	tagSlug, ok := polymarketTagSlugs[strings.ToLower(category)]
-	if !ok {
-		return nil, fmt.Errorf("polymarket: unknown category %q", category)
-	}
-
 	limit := 50
 	if c.maxMarkets > 0 && c.maxMarkets < limit {
 		limit = c.maxMarkets
 	}
-
-	u := fmt.Sprintf("%s/events?tag_slug=%s&active=true&closed=false&limit=%d&order=volume24hr&ascending=false",
-		c.baseURL, url.QueryEscape(tagSlug), limit)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP GET %s: %w", u, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, u)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
-	}
-
-	// Events endpoint returns an array of events, each with nested markets
-	var events []struct {
-		Image   string            `json:"image"`
-		Markets []json.RawMessage `json:"markets"`
-	}
-	if err := json.Unmarshal(body, &events); err != nil {
-		return nil, fmt.Errorf("unmarshalling events: %w", err)
-	}
-
-	var result []*venues.RawMarket
-	seen := map[string]struct{}{}
-	for _, ev := range events {
-		for _, item := range ev.Markets {
-			var m polymarketMarket
-			if err := json.Unmarshal(item, &m); err != nil {
-				continue
-			}
-			if !m.Active || m.Closed || m.ID == "" {
-				continue
-			}
-			if _, ok := seen[m.ID]; ok {
-				continue
-			}
-			seen[m.ID] = struct{}{}
-			payload := injectImageIntoPayload(item, ev.Image)
-			result = append(result, &venues.RawMarket{
-				VenueID:       models.VenuePolymarket,
-				VenueMarketID: m.ID,
-				Payload:       payload,
-			})
-			if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
-				break
-			}
-		}
-		if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
-			break
-		}
-	}
-
-	fmt.Printf("[polymarket] Category %q (tag_slug=%s): %d markets from %d events\n",
-		category, tagSlug, len(result), len(events))
-	return result, nil
+	return c.FetchMarketsByCategoryWithLimit(ctx, category, limit)
 }
 
 // FetchMarketsByCategoryWithLimit returns active markets for a category with a per-call limit override.
@@ -217,7 +147,7 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, u)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
@@ -424,7 +354,7 @@ func (c *Client) fetchPage(ctx context.Context, url string, keep func(polymarket
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
@@ -506,7 +436,7 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, searchURL)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
@@ -664,7 +594,7 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 		return result
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 	if err != nil {
 		return result
 	}

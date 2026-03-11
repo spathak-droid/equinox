@@ -161,7 +161,7 @@ Return ONLY a JSON array of %d strings in the same order. No explanation.`, sb.S
 		return nil, fmt.Errorf("openai request: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxLLMRespSize))
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(respBody))

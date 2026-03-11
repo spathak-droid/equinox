@@ -23,6 +23,7 @@ import (
 
 const (
 	defaultSearchBase = "https://api.elections.kalshi.com/v1/search/series"
+	maxRespSize       = 10 * 1024 * 1024 // 10MB limit for venue API responses
 )
 
 // ─── v1 search response types ───────────────────────────────────────────────
@@ -379,7 +380,7 @@ func (c *Client) doGet(ctx context.Context, rawURL string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("HTTP GET %s: %w", rawURL, err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 		resp.Body.Close()
 
 		if resp.StatusCode == http.StatusTooManyRequests {
