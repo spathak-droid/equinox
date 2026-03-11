@@ -46,16 +46,18 @@ type seriesHit struct {
 }
 
 type v1Market struct {
-	Ticker       string `json:"ticker"`
-	YesBid       int    `json:"yes_bid"`
-	YesAsk       int    `json:"yes_ask"`
-	LastPrice    int    `json:"last_price"`
-	Volume       int    `json:"volume"`
-	CloseTS      string `json:"close_ts"`
-	YesSubtitle  string `json:"yes_subtitle"`
-	NoSubtitle   string `json:"no_subtitle"`
-	Score        int    `json:"score"`
-	PriceDelta   int    `json:"price_delta"`
+	Ticker            string `json:"ticker"`
+	YesBid            int    `json:"yes_bid"`
+	YesAsk            int    `json:"yes_ask"`
+	LastPrice         int    `json:"last_price"`
+	Volume            int    `json:"volume"`
+	CloseTS           string `json:"close_ts"`
+	YesSubtitle       string `json:"yes_subtitle"`
+	NoSubtitle        string `json:"no_subtitle"`
+	Score             int    `json:"score"`
+	PriceDelta        int    `json:"price_delta"`
+	ImageURLLightMode string `json:"image_url_light_mode"`
+	ImageURLDarkMode  string `json:"image_url_dark_mode"`
 }
 
 // ─── Client ─────────────────────────────────────────────────────────────────
@@ -275,22 +277,24 @@ func flattenHits(hits []seriesHit) []*venues.RawMarket {
 
 			// Build a payload the normalizer's kalshiRaw struct can parse.
 			payload := map[string]interface{}{
-				"ticker":        mkt.Ticker,
-				"event_ticker":  hit.EventTicker,
-				"series_ticker": hit.SeriesTicker,
-				"event_title":   hit.EventTitle,
-				"title":         hit.EventTitle,
-				"subtitle":      mkt.YesSubtitle,
-				"status":        "active",
-				"close_time":    mkt.CloseTS,
-				"yes_bid":       mkt.YesBid,
-				"yes_ask":       mkt.YesAsk,
-				"no_bid":        100 - mkt.YesAsk,
-				"no_ask":        100 - mkt.YesBid,
-				"volume":        mkt.Volume,
-				"volume_24h":    0,
-				"open_interest": 0,
-				"liquidity":     0,
+				"ticker":                mkt.Ticker,
+				"event_ticker":          hit.EventTicker,
+				"series_ticker":         hit.SeriesTicker,
+				"event_title":           hit.EventTitle,
+				"title":                 hit.EventTitle,
+				"subtitle":              mkt.YesSubtitle,
+				"status":                "active",
+				"close_time":            mkt.CloseTS,
+				"yes_bid":               mkt.YesBid,
+				"yes_ask":               mkt.YesAsk,
+				"no_bid":                100 - mkt.YesAsk,
+				"no_ask":                100 - mkt.YesBid,
+				"volume":                mkt.Volume,
+				"volume_24h":            0,
+				"open_interest":         0,
+				"liquidity":             0,
+				"image_url_light_mode":  mkt.ImageURLLightMode,
+				"image_url_dark_mode":   mkt.ImageURLDarkMode,
 			}
 
 			b, err := json.Marshal(payload)

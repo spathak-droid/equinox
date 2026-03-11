@@ -51,6 +51,7 @@ type CanonicalMarket struct {
 	Description string   `json:"description,omitempty"`
 	Category    string   `json:"category,omitempty"` // Normalized broad category (see NormalizeCategory)
 	Tags        []string `json:"tags,omitempty"`
+	ImageURL    string   `json:"image_url,omitempty"` // Display image for FE (light-mode / default)
 
 	// --- Resolution ---
 	// ResolutionDate is nil when the venue does not specify one.

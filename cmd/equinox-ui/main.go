@@ -81,6 +81,7 @@ type MarketView struct {
 	Status             string  `json:"status"`
 	Description        string  `json:"description"`
 	Tags               string  `json:"tags"`
+	ImageURL           string  `json:"image_url"`
 	YesPrice           float64 `json:"yes_price"`
 	Liquidity          float64 `json:"liquidity"`
 	Spread             float64 `json:"spread"`
@@ -358,6 +359,7 @@ func toMarketView(m *models.CanonicalMarket) MarketView {
 		Status:             string(m.Status),
 		Description:        m.Description,
 		Tags:               strings.Join(m.Tags, ", "),
+		ImageURL:           m.ImageURL,
 		YesPrice:           m.YesPrice,
 		Liquidity:          m.Liquidity,
 		Spread:             m.Spread,
@@ -650,6 +652,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 
 /* Market header: venue chip + title on one line */
 .mkt-header { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; }
+.mkt-thumb { width: 36px; height: 36px; border-radius: 6px; object-fit: cover; flex-shrink: 0; background: var(--bg-elevated); }
 .venue-dot { width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.6rem; font-weight: 800; color: white; flex-shrink: 0; margin-top: 1px; }
 .venue-dot.vd-polymarket { background: var(--poly-color); }
 .venue-dot.vd-kalshi { background: var(--kalshi-color); }
@@ -826,8 +829,10 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
          data-volume24h="{{printf "%.2f" $p.MarketA.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketA.OpenInterest}}"
          data-resolution-criteria="{{$p.MarketA.ResolutionRaw}}" data-venue-link="{{$p.MarketA.VenueLink}}"
          data-venue-search-link="{{$p.MarketA.VenueSearchLink}}" data-venue-search-link-alt="{{$p.MarketA.VenueSearchLinkAlt}}"
+         data-image-url="{{$p.MarketA.ImageURL}}"
          data-payload="{{$p.MarketA.RawPayloadB64}}">
       <div class="mkt-header">
+        {{if $p.MarketA.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketA.ImageURL}}" alt="" loading="lazy">{{end}}
         <div class="venue-dot vd-{{$p.MarketA.Venue}}">{{venueIcon $p.MarketA.Venue}}</div>
         <div class="mkt-title">{{$p.MarketA.Title}}</div>
       </div>
@@ -848,8 +853,10 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
          data-volume24h="{{printf "%.2f" $p.MarketB.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketB.OpenInterest}}"
          data-resolution-criteria="{{$p.MarketB.ResolutionRaw}}" data-venue-link="{{$p.MarketB.VenueLink}}"
          data-venue-search-link="{{$p.MarketB.VenueSearchLink}}" data-venue-search-link-alt="{{$p.MarketB.VenueSearchLinkAlt}}"
+         data-image-url="{{$p.MarketB.ImageURL}}"
          data-payload="{{$p.MarketB.RawPayloadB64}}">
       <div class="mkt-header">
+        {{if $p.MarketB.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketB.ImageURL}}" alt="" loading="lazy">{{end}}
         <div class="venue-dot vd-{{$p.MarketB.Venue}}">{{venueIcon $p.MarketB.Venue}}</div>
         <div class="mkt-title">{{$p.MarketB.Title}}</div>
       </div>
@@ -878,6 +885,9 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 <div id="marketDetailModal" class="modal-overlay" aria-hidden="true">
   <div class="modal-bg" onclick="closeMarketModal()"></div>
   <div class="modal-container">
+    <div id="mdImageBanner" style="display:none;height:120px;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;">
+      <img id="mdImage" src="" alt="" style="width:100%;height:100%;object-fit:cover;">
+    </div>
     <div class="modal-header">
       <div class="modal-header-title" id="mdTitle"></div>
       <button class="modal-close-btn" onclick="closeMarketModal()">
@@ -940,7 +950,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   ["mdTitle","mdVenue","mdMarketId","mdStatus","mdDescription","mdTags",
    "mdCategory","mdResolutionDate","mdResolutionCriteria","mdYes",
    "mdLiquidity","mdSpread","mdCreatedAt","mdUpdatedAt","mdVolume",
-   "mdOpenInterest","mdRawPayload","mdLinks"].forEach(function(id) {
+   "mdOpenInterest","mdRawPayload","mdLinks","mdImage","mdImageBanner"].forEach(function(id) {
     fields[id] = document.getElementById(id);
   });
 
@@ -964,6 +974,15 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     fields.mdYes.textContent = safe(d.yes);
     fields.mdLiquidity.textContent = safe(d.liquidity);
     fields.mdSpread.textContent = safe(d.spread);
+
+    var imgUrl = d.imageUrl || "";
+    if (imgUrl) {
+      fields.mdImage.src = imgUrl;
+      fields.mdImageBanner.style.display = "block";
+    } else {
+      fields.mdImage.src = "";
+      fields.mdImageBanner.style.display = "none";
+    }
 
     var b64 = d.payload || "";
     if (b64) {

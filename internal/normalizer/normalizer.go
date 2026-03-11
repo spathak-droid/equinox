@@ -70,6 +70,7 @@ type polymarketRaw struct {
 	Liquidity     string `json:"liquidity"`     // API returns string
 	LiquidityNum  float64 `json:"liquidityNum"`
 	Category      string `json:"category"`
+	Image         string `json:"image"` // event-level image URL (injected by client)
 	// public-search fields (not present in /markets endpoint)
 	BestBid       float64 `json:"bestBid"`
 	BestAsk       float64 `json:"bestAsk"`
@@ -109,6 +110,7 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		Title:            raw.Question,
 		Description:   raw.Description,
 		Category:      models.NormalizeCategory(strings.ToLower(raw.Category)),
+		ImageURL:      raw.Image,
 		Volume24h:     raw.Volume24hr,
 		Liquidity:     raw.LiquidityNum,
 		Status:        models.StatusActive,
@@ -185,6 +187,8 @@ type kalshiRaw struct {
 	Liquidity     float64 `json:"liquidity"`
 	RulesPrimary  string  `json:"rules_primary"`
 	RulesSecondary string  `json:"rules_secondary"`
+	ImageURLLight string  `json:"image_url_light_mode"`
+	ImageURLDark  string  `json:"image_url_dark_mode"`
 }
 
 func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
@@ -223,6 +227,7 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		OpenInterest:  raw.OpenInterest,
 		Liquidity:     estimateKalshiLiquidity(raw),
 		Status:        models.StatusActive,
+		ImageURL:      raw.ImageURLLight,
 		UpdatedAt:     time.Now(),
 		CreatedAt:     time.Now(),
 		RawPayload:    r.Payload,

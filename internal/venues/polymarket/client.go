@@ -128,6 +128,7 @@ func (c *Client) FetchMarketsByCategory(ctx context.Context, category string) ([
 
 	// Events endpoint returns an array of events, each with nested markets
 	var events []struct {
+		Image   string            `json:"image"`
 		Markets []json.RawMessage `json:"markets"`
 	}
 	if err := json.Unmarshal(body, &events); err != nil {
@@ -149,10 +150,11 @@ func (c *Client) FetchMarketsByCategory(ctx context.Context, category string) ([
 				continue
 			}
 			seen[m.ID] = struct{}{}
+			payload := injectImageIntoPayload(item, ev.Image)
 			result = append(result, &venues.RawMarket{
 				VenueID:       models.VenuePolymarket,
 				VenueMarketID: m.ID,
-				Payload:       item,
+				Payload:       payload,
 			})
 			if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
 				break
@@ -204,6 +206,7 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 	}
 
 	var events []struct {
+		Image   string            `json:"image"`
 		Markets []json.RawMessage `json:"markets"`
 	}
 	if err := json.Unmarshal(body, &events); err != nil {
@@ -225,11 +228,12 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 				continue
 			}
 			seen[m.ID] = struct{}{}
+			payload := injectImageIntoPayload(item, ev.Image)
 			result = append(result, &venues.RawMarket{
 				VenueID:       models.VenuePolymarket,
 				VenueMarketID: m.ID,
 				FetchCategory: category,
-				Payload:       item,
+				Payload:       payload,
 			})
 			if len(result) >= limit {
 				break
@@ -243,6 +247,24 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 	fmt.Printf("[polymarket] Category %q (limit=%d): %d markets from %d events\n",
 		category, limit, len(result), len(events))
 	return result, nil
+}
+
+// injectImageIntoPayload merges an event-level image URL into a market JSON payload.
+// If imageURL is empty or merging fails, the original payload is returned unchanged.
+func injectImageIntoPayload(payload json.RawMessage, imageURL string) json.RawMessage {
+	if imageURL == "" {
+		return payload
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return payload
+	}
+	m["image"] = imageURL
+	b, err := json.Marshal(m)
+	if err != nil {
+		return payload
+	}
+	return b
 }
 
 // fetchMarketsByKeyword fetches active markets and filters client-side by keyword.
@@ -430,6 +452,7 @@ type publicSearchEvent struct {
 	Title   string               `json:"title"`
 	Slug    string               `json:"slug"`
 	EndDate string               `json:"endDate"`
+	Image   string               `json:"image"`
 	Active  bool                 `json:"active"`
 	Closed  bool                 `json:"closed"`
 	Markets []publicSearchMarket `json:"markets"`
@@ -509,6 +532,7 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 				"bestBid":       mkt.BestBid,
 				"bestAsk":       mkt.BestAsk,
 				"spread":        mkt.Spread,
+				"image":         ev.Image,
 			}
 
 			b, err := json.Marshal(payload)
