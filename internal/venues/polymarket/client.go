@@ -502,13 +502,18 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 	var result []*venues.RawMarket
 	seen := map[string]struct{}{}
 
+	const maxMarketsPerEvent = 10
 	for _, ev := range searchResp.Events {
+		evCount := 0
 		for _, mkt := range ev.Markets {
 			if mkt.Closed || mkt.Slug == "" {
 				continue
 			}
 			if _, ok := seen[mkt.Slug]; ok {
 				continue
+			}
+			if evCount >= maxMarketsPerEvent {
+				break
 			}
 			seen[mkt.Slug] = struct{}{}
 
@@ -545,6 +550,7 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 				VenueMarketID: mkt.Slug,
 				Payload:       b,
 			})
+			evCount++
 
 			if c.maxMarkets > 0 && len(result) >= c.maxMarkets {
 				break

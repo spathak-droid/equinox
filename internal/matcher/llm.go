@@ -65,8 +65,8 @@ func (l *LLMMatcher) MatchAll(ctx context.Context, sourceMarkets, candidateMarke
 	var allResults []*LLMMatchResult
 	var wg sync.WaitGroup
 
-	// All calls in parallel — one per source market
-	sem := make(chan struct{}, 10)
+	// Limit concurrency to avoid blasting the TPM limit.
+	sem := make(chan struct{}, 3)
 
 	for _, src := range sourceMarkets {
 		wg.Add(1)
@@ -148,22 +148,45 @@ It is much better to miss a true match than to falsely match two different quest
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+l.apiKey)
+	// Retry up to 4 times on 429, sleeping the duration OpenAI says to wait.
+	var resp *http.Response
+	var respBody []byte
+	for attempt := 0; attempt < 4; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+l.apiKey)
 
-	resp, err := l.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("openai request: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err = l.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("openai request: %w", err)
+		}
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		if resp.StatusCode != 429 {
+			break
+		}
+
+		// Parse Retry-After header (seconds), fall back to exponential backoff.
+		wait := time.Duration(1<<uint(attempt)) * time.Second
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			var secs float64
+			if _, err := fmt.Sscanf(ra, "%f", &secs); err == nil && secs > 0 {
+				wait = time.Duration(secs*1000) * time.Millisecond
+			}
+		}
+		fmt.Printf("[llm-matcher] 429 rate limit, waiting %v before retry %d/3...\n", wait.Round(time.Millisecond), attempt+1)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
 	}
 
 	if resp.StatusCode != 200 {

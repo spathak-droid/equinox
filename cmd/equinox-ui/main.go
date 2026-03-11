@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -34,6 +35,23 @@ import (
 const uiPerVenueLimit = 100
 const maxDisplayPairs = 20
 
+// resultCache caches pipeline results for 2 minutes so the /stream endpoint
+// can run the pipeline once and the subsequent GET / serves instantly.
+var resultCache sync.Map // map[string]*cachedResult
+
+type cachedResult struct {
+	data      *PageData
+	expiresAt time.Time
+}
+
+// progressEvent is an SSE payload sent during the search pipeline.
+type progressEvent struct {
+	Type  string `json:"type"`            // "step" | "result" | "done" | "error"
+	Msg   string `json:"msg"`
+	Count int    `json:"count,omitempty"` // market / pair count for "result" events
+	Venue string `json:"venue,omitempty"` // "polymarket" | "kalshi" | ""
+}
+
 // PageData is passed to the HTML template.
 type PageData struct {
 	SearchQuery      string
@@ -41,22 +59,8 @@ type PageData struct {
 	VenueCounts      map[models.VenueID]int
 	MatchCount       int
 	ProbableCount    int
-	NearMisses       []NearMissView
 	DiagnosisMessage string
 	HasQuery         bool
-}
-
-// NearMissView is a rejected pair shown when no matches are found.
-type NearMissView struct {
-	TitleA         string
-	TitleB         string
-	VenueA         string
-	VenueB         string
-	FuzzyScore     float64
-	EmbeddingScore float64
-	CompositeScore float64
-	DatePenalty    float64
-	Reason         string
 }
 
 // PairView is a single matched pair ready for rendering.
@@ -127,11 +131,22 @@ func main() {
 		if query == "" {
 			data = &PageData{VenueCounts: map[models.VenueID]int{}}
 		} else {
-			fmt.Printf("[equinox-ui] Running search pipeline q=%q\n", query)
-			data, err = runSearchPipeline(cfg, kalshiClient, polyClient, query)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			// Check short-lived cache populated by /stream
+			if v, ok := resultCache.Load(query); ok {
+				cr := v.(*cachedResult)
+				if time.Now().Before(cr.expiresAt) {
+					data = cr.data
+				} else {
+					resultCache.Delete(query)
+				}
+			}
+			if data == nil {
+				fmt.Printf("[equinox-ui] Running search pipeline q=%q\n", query)
+				data, err = runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, nil)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 		}
 
@@ -142,17 +157,62 @@ func main() {
 		}
 	})
 
+	// /stream runs the search pipeline and emits SSE progress events, then
+	// caches the result so the subsequent GET / is served instantly.
+	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		if query == "" {
+			http.Error(w, "missing q", http.StatusBadRequest)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		var mu sync.Mutex
+		emit := func(evt progressEvent) {
+			b, _ := json.Marshal(evt)
+			mu.Lock()
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			flusher.Flush()
+			mu.Unlock()
+		}
+
+		data, pipelineErr := runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, emit)
+		if pipelineErr != nil {
+			emit(progressEvent{Type: "error", Msg: pipelineErr.Error()})
+			return
+		}
+
+		// Cache result so the redirect GET / is instant
+		resultCache.Store(query, &cachedResult{
+			data:      data,
+			expiresAt: time.Now().Add(2 * time.Minute),
+		})
+		emit(progressEvent{Type: "done"})
+	})
+
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// runSearchPipeline searches both venues for a query, then cross-matches
-// Polymarket results against Kalshi results directly (no brute-force n×n).
-func runSearchPipeline(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, query string) (*PageData, error) {
+// runSearchPipelineWithProgress searches both venues for a query, cross-matches,
+// and optionally emits SSE progress events via the emit callback (nil = silent).
+func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, query string, emit func(progressEvent)) (*PageData, error) {
+	if emit == nil {
+		emit = func(progressEvent) {} // no-op when called without SSE
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Fetch from both venues in parallel
-	fmt.Printf("[equinox-ui] Fetching from both venues q=%q...\n", query)
+	emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching markets for \"%s\"...", query)})
+
 	var polyRaw, kalshiRaw []*venues.RawMarket
 	var polyErr, kalshiErr error
 	var wg sync.WaitGroup
@@ -169,11 +229,18 @@ func runSearchPipeline(cfg *config.Config, kalshiClient *kalshi.Client, polyClie
 
 	if polyErr != nil {
 		fmt.Printf("[equinox-ui] WARNING: skipping polymarket: %v\n", polyErr)
+		emit(progressEvent{Type: "result", Msg: "Polymarket unavailable", Venue: "polymarket"})
+	} else {
+		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Polymarket: %d markets", len(polyRaw)), Count: len(polyRaw), Venue: "polymarket"})
 	}
 	if kalshiErr != nil {
 		fmt.Printf("[equinox-ui] WARNING: skipping kalshi: %v\n", kalshiErr)
+		emit(progressEvent{Type: "result", Msg: "Kalshi unavailable", Venue: "kalshi"})
+	} else {
+		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Kalshi: %d markets", len(kalshiRaw)), Count: len(kalshiRaw), Venue: "kalshi"})
 	}
 
+	emit(progressEvent{Type: "step", Msg: "Normalizing market data..."})
 	norm := normalizer.New(cfg)
 	polyMarkets, _ := norm.Normalize(ctx, polyRaw)
 	kalshiMarkets, _ := norm.Normalize(ctx, kalshiRaw)
@@ -182,17 +249,9 @@ func runSearchPipeline(cfg *config.Config, kalshiClient *kalshi.Client, polyClie
 		models.VenuePolymarket: len(polyMarkets),
 		models.VenueKalshi:     len(kalshiMarkets),
 	}
-	fmt.Printf("[equinox-ui] Search results: poly=%d kalshi=%d\n", len(polyMarkets), len(kalshiMarkets))
 
-	if len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
-		missingVenue := "Polymarket"
-		if len(kalshiMarkets) == 0 {
-			missingVenue = "Kalshi"
-		}
-		fmt.Printf("[equinox-ui] WARNING: %s returned 0 markets for %q\n", missingVenue, query)
-	}
+	emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Running cross-venue matching (%d × %d pairs)...", len(polyMarkets), len(kalshiMarkets))})
 
-	// Build search results: both directions, no source/candidate distinction
 	var searchResults []matcher.SearchResult
 	for _, pm := range polyMarkets {
 		searchResults = append(searchResults, matcher.SearchResult{
@@ -207,9 +266,14 @@ func runSearchPipeline(cfg *config.Config, kalshiClient *kalshi.Client, polyClie
 		})
 	}
 
-	// Score using the search matcher (not brute-force)
 	m := matcher.New(cfg)
 	pairs := m.FindEquivalentPairsFromSearch(ctx, searchResults)
+
+	if len(pairs) == 0 {
+		emit(progressEvent{Type: "result", Msg: "No equivalent pairs found"})
+	} else {
+		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Found %d equivalent pair(s)", len(pairs)), Count: len(pairs)})
+	}
 
 	var allMarkets []*models.CanonicalMarket
 	allMarkets = append(allMarkets, polyMarkets...)
@@ -224,7 +288,6 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 		pairs = pairs[:maxDisplayPairs]
 	}
 
-	var nearMisses []NearMissView
 	var diagnosisMsg string
 	if len(pairs) == 0 {
 		rejected := m.TopRejectedPairs(allMarkets, 5)
@@ -232,17 +295,6 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 			fmt.Printf("[equinox-ui] reject #%d score=%.3f fuzzy=%.3f emb=%.3f | A=%q | B=%q | reason=%s\n",
 				i+1, rj.CompositeScore, rj.FuzzyScore, rj.EmbeddingScore,
 				rj.MarketA.Title, rj.MarketB.Title, rj.Explanation)
-			nearMisses = append(nearMisses, NearMissView{
-				TitleA:         rj.MarketA.Title,
-				TitleB:         rj.MarketB.Title,
-				VenueA:         string(rj.MarketA.VenueID),
-				VenueB:         string(rj.MarketB.VenueID),
-				FuzzyScore:     rj.FuzzyScore,
-				EmbeddingScore: rj.EmbeddingScore,
-				CompositeScore: rj.CompositeScore,
-				DatePenalty:    rj.DatePenalty,
-				Reason:         rj.Explanation,
-			})
 		}
 		diagnosisMsg = buildDiagnosis(venueCounts, rejected)
 	}
@@ -289,7 +341,6 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 		VenueCounts:      venueCounts,
 		MatchCount:       matchCount,
 		ProbableCount:    probableCount,
-		NearMisses:       nearMisses,
 		DiagnosisMessage: diagnosisMsg,
 		HasQuery:         true,
 	}, nil
@@ -602,16 +653,6 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 .diagnosis-box { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; }
 .diagnosis-label { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
 .diagnosis-msg { font-size: 0.82rem; color: var(--text-secondary); line-height: 1.45; }
-.near-miss-title { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px; }
-.near-miss-card { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 6px; }
-.near-miss-titles { display: flex; gap: 6px; align-items: flex-start; margin-bottom: 6px; }
-.near-miss-vs { color: var(--text-muted); font-size: 0.68rem; font-weight: 600; flex-shrink: 0; padding-top: 1px; }
-.near-miss-t { font-size: 0.78rem; color: var(--text-primary); flex: 1; line-height: 1.3; }
-.near-miss-venue { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
-.near-miss-scores { display: flex; gap: 8px; flex-wrap: wrap; }
-.near-miss-pill { font-size: 0.68rem; color: var(--text-muted); background: var(--bg-card); padding: 1px 6px; border-radius: 999px; }
-.near-miss-pill strong { color: var(--text-secondary); font-weight: 600; }
-.near-miss-reason { font-size: 0.7rem; color: var(--text-muted); margin-top: 4px; font-style: italic; }
 
 /* ── Compact pair card ────────────────────────────────────────────── */
 .pair-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; transition: border-color 150ms, box-shadow 150ms; }
@@ -705,6 +746,31 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   .score-pills { display: none; }
   .hero-title { font-size: 1.8rem; }
 }
+
+/* ── Search loader ───────────────────────────────────────────── */
+.search-loader { max-width: 500px; margin: 72px auto 0; }
+.loader-query { font-size: 1rem; font-weight: 600; color: var(--text-primary); margin-bottom: 28px; }
+.loader-query em { color: var(--accent-bright); font-style: normal; }
+.loader-log { display: flex; flex-direction: column; gap: 0; }
+.loader-line {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 0.84rem; padding: 7px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  opacity: 0; animation: loaderIn 280ms ease forwards;
+}
+.loader-line:last-child { border-bottom: none; }
+.loader-icon { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 15px; border-radius: 50%; }
+.loader-icon.spin { animation: loaderSpin 0.9s linear infinite; color: var(--accent-bright); }
+.loader-icon.ok { color: #4ade80; }
+.loader-icon.warn { color: #f59e0b; }
+.loader-msg { flex: 1; line-height: 1.35; }
+.loader-step .loader-msg { color: var(--text-muted); }
+.loader-result .loader-msg { color: var(--text-secondary); }
+.loader-count { font-size: 0.75rem; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: var(--bg-elevated); color: var(--accent-bright); margin-left: auto; flex-shrink: 0; }
+.loader-venue-poly { color: #818cf8; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-left: auto; }
+.loader-venue-kalshi { color: #fbbf24; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-left: auto; }
+@keyframes loaderIn { from { opacity:0; transform:translateX(-10px); } to { opacity:1; transform:translateX(0); } }
+@keyframes loaderSpin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -755,30 +821,6 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
       <div class="diagnosis-label">Why no matches?</div>
       <div class="diagnosis-msg">{{.DiagnosisMessage}}</div>
     </div>
-    {{if .NearMisses}}
-    <div class="near-miss-title">Closest cross-venue candidates</div>
-    {{range .NearMisses}}
-    <div class="near-miss-card">
-      <div class="near-miss-titles">
-        <div style="flex:1">
-          <div class="near-miss-venue">{{.VenueA}}</div>
-          <div class="near-miss-t">{{.TitleA}}</div>
-        </div>
-        <div class="near-miss-vs">vs</div>
-        <div style="flex:1">
-          <div class="near-miss-venue">{{.VenueB}}</div>
-          <div class="near-miss-t">{{.TitleB}}</div>
-        </div>
-      </div>
-      <div class="near-miss-scores">
-        <div class="near-miss-pill">Fuzzy <strong>{{score .FuzzyScore}}</strong></div>
-        <div class="near-miss-pill">Composite <strong>{{score .CompositeScore}}</strong></div>
-        {{if gt .DatePenalty 0.0}}<div class="near-miss-pill">Date penalty <strong>{{score .DatePenalty}}</strong></div>{{end}}
-      </div>
-      <div class="near-miss-reason">{{.Reason}}</div>
-    </div>
-    {{end}}
-    {{end}}
   </div>
   {{else}}
   <div class="empty-sub">Try a different search query, or adjust MATCH_THRESHOLD / MAX_DATE_DELTA_DAYS to widen the match window.</div>
@@ -1041,6 +1083,97 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     });
   }, { threshold: 0.05 });
   document.querySelectorAll(".pair-card").forEach(function(card) { observer.observe(card); });
+})();
+
+/* ── SSE search loader ───────────────────────────────────── */
+(function() {
+  var content = document.querySelector(".content");
+
+  function showLoader(q) {
+    content.innerHTML =
+      '<div class="search-loader">' +
+        '<div class="loader-query">Searching for <em>' + escHtml(q) + '</em></div>' +
+        '<div class="loader-log" id="loaderLog"></div>' +
+      '</div>';
+  }
+
+  function addLine(cls, iconCls, iconChar, msg, extra) {
+    var log = document.getElementById("loaderLog");
+    if (!log) return;
+    var delay = log.children.length * 60;
+    var line = document.createElement("div");
+    line.className = "loader-line " + cls;
+    line.style.animationDelay = delay + "ms";
+    line.innerHTML =
+      '<span class="loader-icon ' + iconCls + '">' + iconChar + '</span>' +
+      '<span class="loader-msg">' + escHtml(msg) + '</span>' +
+      (extra || "");
+    log.appendChild(line);
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function venueTag(venue) {
+    if (!venue) return "";
+    return '<span class="loader-venue-' + venue + '">' + venue + '</span>';
+  }
+
+  function countBadge(n) {
+    if (!n) return "";
+    return '<span class="loader-count">' + n + '</span>';
+  }
+
+  function startStreamSearch(q) {
+    showLoader(q);
+    history.pushState(null, "", "/?q=" + encodeURIComponent(q));
+
+    var es = new EventSource("/stream?q=" + encodeURIComponent(q));
+    es.onmessage = function(e) {
+      try {
+        var evt = JSON.parse(e.data);
+        if (evt.type === "step") {
+          addLine("loader-step", "spin", "↻", evt.msg, "");
+        } else if (evt.type === "result") {
+          var extra = venueTag(evt.venue);
+          if (evt.count > 0) extra = countBadge(evt.count) + (evt.venue ? venueTag(evt.venue) : "");
+          addLine("loader-result", "ok", "✓", evt.msg, extra);
+        } else if (evt.type === "done") {
+          es.close();
+          window.location.href = "/?q=" + encodeURIComponent(q);
+        } else if (evt.type === "error") {
+          es.close();
+          addLine("loader-result", "warn", "!", evt.msg, "");
+        }
+      } catch(ex) {}
+    };
+    es.onerror = function() {
+      es.close();
+      window.location.href = "/?q=" + encodeURIComponent(q);
+    };
+  }
+
+  document.querySelectorAll("form").forEach(function(form) {
+    form.addEventListener("submit", function(e) {
+      var input = form.querySelector("[name=q]");
+      if (!input) return;
+      var q = input.value.trim();
+      if (!q) return;
+      e.preventDefault();
+      startStreamSearch(q);
+    });
+  });
+
+  // Intercept hint links (they navigate directly, skip them to stay SSE-driven)
+  document.querySelectorAll(".hero-hint").forEach(function(a) {
+    a.addEventListener("click", function(e) {
+      e.preventDefault();
+      var url = new URL(a.href);
+      var q = url.searchParams.get("q") || "";
+      if (q) startStreamSearch(q);
+    });
+  });
 })();
 </script>
 </body>

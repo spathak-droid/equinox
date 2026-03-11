@@ -268,10 +268,15 @@ func flattenHits(hits []seriesHit) []*venues.RawMarket {
 	var out []*venues.RawMarket
 	seen := map[string]struct{}{}
 
+	const maxMarketsPerSeries = 10
 	for _, hit := range hits {
+		hitCount := 0
 		for _, mkt := range hit.Markets {
 			if _, ok := seen[mkt.Ticker]; ok {
 				continue
+			}
+			if hitCount >= maxMarketsPerSeries {
+				break
 			}
 			seen[mkt.Ticker] = struct{}{}
 
@@ -308,6 +313,7 @@ func flattenHits(hits []seriesHit) []*venues.RawMarket {
 				FetchCategory: strings.ToLower(hit.Category),
 				Payload:       b,
 			})
+			hitCount++
 		}
 	}
 	return out
