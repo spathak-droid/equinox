@@ -5,65 +5,45 @@
 // Two markets are considered equivalent when they represent the same real-world binary
 // question and are expected to resolve on approximately the same date.
 //
-// This definition has three components:
-//  1. Same question — the underlying event is the same (e.g. "Will X win election Y")
-//  2. Same binary outcome — both YES outcomes refer to the same real-world result
-//  3. Same resolution window — they resolve within MaxDateDeltaDays of each other
-//
 // # Detection methodology
 //
-// We use a four-stage pipeline:
+// We use a multi-stage pipeline (no AI/LLM/embeddings):
+//
+//  Stage 0 — Signature exact-match (instant, free):
+//    - Canonical semantic signature hash comparison.
+//    - If both markets hash identically, they're asking the same question.
 //
 //  Stage 1 — Hard filters (fast, cheap):
-//    - Date proximity: resolution dates must be within MaxDateDeltaDays. Markets with no
-//      resolution date are excluded from date-gated matching but may still match via
-//      embedding similarity alone.
 //    - Status: both markets must be active.
+//
+//  Stage 1b — Semantic gate:
+//    - If both signatures are well-populated but incompatible (different entities,
+//      thresholds, or actions), reject immediately.
 //
 //  Stage 2 — Fuzzy title matching (fast, no API cost):
 //    - Normalized edit distance (Levenshtein) + keyword Jaccard overlap
-//    - Keyword Jaccard overlap after stopword removal
 //    - Score: [0.0, 1.0]
 //
-//  Stage 3 — Embedding cosine similarity (slower, requires OpenAI key):
-//    - Cosine similarity between pre-computed title embeddings
-//    - Score: [0.0, 1.0]
-//    - Skipped when embeddings are unavailable
+//  Stage 3 — Multi-signal composite scoring:
+//    - Event signature match, entity overlap, date proximity, price proximity, category bonus
 //
-//  Stage 4 — LLM pairwise disambiguation (only for ambiguous pairs):
-//    - Applied to pairs where composite score is in [ProbableMatchThreshold, MatchThreshold)
-//    - Batches all ambiguous pairs into a single OpenAI chat API call
-//    - LLM returns match/no_match/unsure per pair
-//    - match   → upgrades to ConfidenceMatch
-//    - no_match → removes pair from results
-//    - unsure  → keeps as ConfidenceProbable
+// Final composite score (rule-based):
 //
-// Final composite score:
-//   if embeddings available:  0.40 * fuzzy + 0.60 * embedding
-//   if embeddings absent:     1.00 * fuzzy
+//	composite = 0.30*fuzzy + 0.25*eventMatch + 0.15*entityOverlap +
+//	            0.12*dateProximity + 0.08*priceProximity + 0.10*categoryBonus
 //
 // Thresholds:
-//   composite >= MatchThreshold        → MATCH (skip Stage 4)
-//   composite >= ProbableMatchThreshold → sent to Stage 4 LLM
-//   else                                → NO_MATCH
 //
-// # Known limitations
-//   - Markets with different expiry but same question (e.g. monthly rolling contracts)
-//     may be incorrectly merged if MaxDateDeltaDays is set too high.
-//   - Short, generic titles (e.g. "Will inflation rise?") have high fuzzy similarity
-//     even when they refer to different time periods. The date filter is the main
-//     protection against these false positives.
+//	composite >= MatchThreshold         → MATCH
+//	composite >= ProbableMatchThreshold → PROBABLE_MATCH
+//	else                                → NO_MATCH
 package matcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
-	"time"
-
-	openai "github.com/sashabaranov/go-openai"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
@@ -86,9 +66,14 @@ type MatchResult struct {
 	CompositeScore float64
 
 	// Component scores for transparency
-	FuzzyScore     float64
-	EmbeddingScore float64 // -1 if not computed
-	DatePenalty    float64 // 0.0 = no penalty, 1.0 = full penalty (dates too far apart)
+	FuzzyScore          float64
+	EmbeddingScore      float64 // always -1 (embeddings removed)
+	EventMatchScore     float64 // structured event signature match [0.0, 1.0]
+	EntityOverlapScore  float64 // -1 if not computed
+	DateProximityScore  float64 // -1 if not computed
+	PriceProximityScore float64 // -1 if not computed
+	DatePenalty         float64 // 0.0 = no penalty, 1.0 = full penalty (dates too far apart)
+	SignatureMatch      bool    // true when Stage 0 signature exact-match was used
 
 	// Human-readable explanation of why this decision was made
 	Explanation string
@@ -96,14 +81,12 @@ type MatchResult struct {
 
 // Matcher finds equivalent markets across venues.
 type Matcher struct {
-	cfg    *config.Config
-	openai *openai.Client // nil when no API key configured; enables Stage 4 LLM disambiguation
+	cfg *config.Config
 }
 
 // New creates a Matcher with the given configuration.
-// openaiClient may be nil; if set, Stage 4 LLM disambiguation is enabled for ambiguous pairs.
-func New(cfg *config.Config, openaiClient *openai.Client) *Matcher {
-	return &Matcher{cfg: cfg, openai: openaiClient}
+func New(cfg *config.Config) *Matcher {
+	return &Matcher{cfg: cfg}
 }
 
 // FindEquivalentPairs compares all markets from different venues and returns
@@ -146,21 +129,12 @@ func (m *Matcher) FindEquivalentPairs(ctx context.Context, markets []*models.Can
 		}
 	}
 
-	fmt.Printf("[matcher] Stages 1-3 complete: %d confirmed, %d ambiguous, %d rejected\n",
+	fmt.Printf("[matcher] Comparison complete: %d confirmed, %d ambiguous, %d rejected\n",
 		len(confirmed), len(ambiguous), compared-len(confirmed)-len(ambiguous))
 
-	// Stage 4: LLM disambiguation for ambiguous pairs
-	if m.openai != nil && len(ambiguous) > 0 {
-		resolved := m.disambiguateWithLLM(ctx, ambiguous)
-		for _, r := range resolved {
-			if r.Confidence != ConfidenceNoMatch {
-				confirmed = append(confirmed, r)
-			}
-		}
-	} else if len(ambiguous) > 0 {
-		// No LLM available — only keep ambiguous pairs with high composite scores
-		// to avoid flooding results with low-quality matches.
-		fmt.Printf("[matcher] No LLM available — filtering %d ambiguous pairs (keeping composite >= %.2f)\n",
+	// Keep ambiguous pairs with high composite scores
+	if len(ambiguous) > 0 {
+		fmt.Printf("[matcher] Filtering %d ambiguous pairs (keeping composite >= %.2f)\n",
 			len(ambiguous), m.cfg.MatchThreshold)
 		for _, r := range ambiguous {
 			if r.CompositeScore >= m.cfg.MatchThreshold {
@@ -215,42 +189,114 @@ func (m *Matcher) TopRejectedPairs(markets []*models.CanonicalMarket, limit int)
 	return rejected
 }
 
-// compare runs the full four-stage pipeline for a single market pair
-// (the final stage is conditionally executed by the caller during post-processing).
+// compare runs the full pipeline for a single market pair.
+// Stage 0: Signature exact-match (instant, free)
+// Stage 1: Hard filters + semantic gates
+// Stage 2: Fuzzy title match
+// Stage 3: Multi-signal composite scoring
 func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 	result := &MatchResult{
-		MarketA:        a,
-		MarketB:        b,
-		EmbeddingScore: -1, // sentinel: not computed
+		MarketA:             a,
+		MarketB:             b,
+		EmbeddingScore:      -1, // embeddings removed
+		EntityOverlapScore:  -1,
+		DateProximityScore:  -1,
+		PriceProximityScore: -1,
 	}
 
-	// Stage 1: Hard filters
+	// Stage 0: Signature exact-match
+	sigA := ExtractEventSignature(a.Title)
+	sigB := ExtractEventSignature(b.Title)
+
+	// Populate semantic signatures on the canonical markets for downstream use
+	if csA := sigA.CanonicalSignature(); csA != "" {
+		a.SemanticSignature = csA
+	}
+	if csB := sigB.CanonicalSignature(); csB != "" {
+		b.SemanticSignature = csB
+	}
+
+	if a.SemanticSignature != "" && b.SemanticSignature != "" &&
+		a.SemanticSignature == b.SemanticSignature {
+		result.Confidence = ConfidenceMatch
+		result.CompositeScore = 1.0
+		result.EventMatchScore = 1.0
+		result.SignatureMatch = true
+		result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
+		result.Explanation = fmt.Sprintf(
+			"Stage 0 signature match: sig=%s (entities=%v, threshold=%s, comparator=%s, date=%s)",
+			a.SemanticSignature, sigA.Entities, sigA.Threshold, sigA.Comparator, sigA.DateRef)
+		return result
+	}
+
+	// Stage 1: Hard filters + semantic compatibility gates
 	if !m.passesHardFilters(a, b, result) {
 		result.Confidence = ConfidenceNoMatch
 		return result
 	}
 
+	// Semantic gate: if both signatures are well-populated but incompatible,
+	// reject early.
+	if sigA.Confidence >= 0.25 && sigB.Confidence >= 0.25 {
+		if !SignaturesCompatible(sigA, sigB) {
+			result.Confidence = ConfidenceNoMatch
+			result.EventMatchScore = EventMatchScore(sigA, sigB)
+			result.Explanation = fmt.Sprintf(
+				"Semantic gate rejection: signatures incompatible (A: entities=%v threshold=%s comp=%s, B: entities=%v threshold=%s comp=%s)",
+				sigA.Entities, sigA.Threshold, sigA.Comparator,
+				sigB.Entities, sigB.Threshold, sigB.Comparator)
+			return result
+		}
+	}
+
 	// Stage 2: Fuzzy title match
 	result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
 
-	// Stage 3: Embedding similarity (optional)
-	if a.TitleEmbedding != nil && b.TitleEmbedding != nil {
-		result.EmbeddingScore = cosineSimilarity(a.TitleEmbedding, b.TitleEmbedding)
-	}
+	// Event signature scoring
+	result.EventMatchScore = EventMatchScore(sigA, sigB)
 
-	// Composite score
-	if result.EmbeddingScore >= 0 {
-		result.CompositeScore = 0.40*result.FuzzyScore + 0.60*result.EmbeddingScore
-	} else {
-		result.CompositeScore = result.FuzzyScore
+	// Stage 3: Multi-signal composite scoring (no embeddings)
+	result.EntityOverlapScore = entityOverlapScore(a.Title, b.Title)
+	result.DateProximityScore = dateProximityScore(a, b, m.cfg.MaxDateDeltaDays)
+	result.PriceProximityScore = priceProximityScore(a, b)
+	catBonus := categoryBonus(a, b)
+
+	result.CompositeScore = 0.30*result.FuzzyScore +
+		0.25*result.EventMatchScore +
+		0.15*result.EntityOverlapScore +
+		0.12*result.DateProximityScore +
+		0.08*result.PriceProximityScore +
+		0.10*catBonus
+
+	// Hard veto: if both titles have thresholds and they're different,
+	// these are different events regardless of other signals.
+	if sigA.Threshold != "" && sigB.Threshold != "" && sigA.Threshold != sigB.Threshold {
+		result.CompositeScore *= 0.5 // heavy penalty for threshold mismatch
 	}
 
 	// Apply date penalty as a soft multiplier on the composite score.
-	// This smoothly reduces scores for date-mismatched markets instead of
-	// hard-rejecting them, so near-threshold pairs still get a chance.
 	result.DatePenalty = m.datePenalty(a, b)
 	if result.DatePenalty > 0 {
 		result.CompositeScore *= (1.0 - result.DatePenalty)
+	}
+
+	// Guard 1: Template mismatch — both titles have named entities but they
+	// don't overlap (different subjects in the same event/race).
+	if result.EntityOverlapScore >= 0 && result.EntityOverlapScore < 0.40 {
+		entA := extractEntities(a.Title)
+		entB := extractEntities(b.Title)
+		if len(entA) > 0 && len(entB) > 0 {
+			mismatchPenalty := 0.40 - result.EntityOverlapScore
+			result.CompositeScore *= (1.0 - mismatchPenalty)
+		}
+	}
+
+	// Guard 2: Low title similarity floor — when fuzzy score is very low,
+	// entity/date/price signals alone should not produce a match.
+	if result.FuzzyScore < 0.35 {
+		if result.CompositeScore > m.cfg.ProbableMatchThreshold {
+			result.CompositeScore = m.cfg.ProbableMatchThreshold
+		}
 	}
 
 	// Classification
@@ -258,22 +304,29 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 	if result.DatePenalty > 0 {
 		dateSuffix = fmt.Sprintf(", date_penalty=%.2f", result.DatePenalty)
 	}
+	sigSuffix := ""
+	if sigA.Confidence > 0 || sigB.Confidence > 0 {
+		sigSuffix = fmt.Sprintf(", sig_conf=%.0f%%/%.0f%%", sigA.Confidence*100, sigB.Confidence*100)
+	}
 	switch {
 	case result.CompositeScore >= m.cfg.MatchThreshold:
 		result.Confidence = ConfidenceMatch
 		result.Explanation = fmt.Sprintf(
-			"High confidence match: fuzzy=%.2f, embedding=%.2f, composite=%.2f (threshold=%.2f)%s",
-			result.FuzzyScore, result.EmbeddingScore, result.CompositeScore, m.cfg.MatchThreshold, dateSuffix)
+			"High confidence match: fuzzy=%.2f, event=%.2f, entity=%.2f, date=%.2f, price=%.2f, composite=%.2f (threshold=%.2f)%s%s",
+			result.FuzzyScore, result.EventMatchScore, result.EntityOverlapScore,
+			result.DateProximityScore, result.PriceProximityScore,
+			result.CompositeScore, m.cfg.MatchThreshold, dateSuffix, sigSuffix)
 	case result.CompositeScore >= m.cfg.ProbableMatchThreshold:
 		result.Confidence = ConfidenceProbable
 		result.Explanation = fmt.Sprintf(
-			"Probable match — human review recommended: fuzzy=%.2f, embedding=%.2f, composite=%.2f%s",
-			result.FuzzyScore, result.EmbeddingScore, result.CompositeScore, dateSuffix)
+			"Probable match: fuzzy=%.2f, event=%.2f, entity=%.2f, date=%.2f, price=%.2f, composite=%.2f%s%s",
+			result.FuzzyScore, result.EventMatchScore, result.EntityOverlapScore,
+			result.DateProximityScore, result.PriceProximityScore, result.CompositeScore, dateSuffix, sigSuffix)
 	default:
 		result.Confidence = ConfidenceNoMatch
 		result.Explanation = fmt.Sprintf(
-			"No match: composite=%.2f below threshold=%.2f%s",
-			result.CompositeScore, m.cfg.ProbableMatchThreshold, dateSuffix)
+			"No match: composite=%.2f below threshold=%.2f%s%s",
+			result.CompositeScore, m.cfg.ProbableMatchThreshold, dateSuffix, sigSuffix)
 	}
 
 	return result
@@ -292,13 +345,7 @@ func (m *Matcher) passesHardFilters(a, b *models.CanonicalMarket, result *MatchR
 }
 
 // datePenalty returns a [0.0, 1.0] penalty based on how far apart two markets'
-// resolution dates are. The penalty is:
-//   - 0.0 when dates are within MaxDateDeltaDays (no penalty)
-//   - Linear ramp from 0.0 to 1.0 between MaxDateDeltaDays and 2×MaxDateDeltaDays
-//   - 1.0 (full penalty) beyond 2×MaxDateDeltaDays
-//
-// When either market lacks a resolution date, returns 0.0 (no penalty — we can't
-// tell if dates are mismatched, so we let other signals decide).
+// resolution dates are.
 func (m *Matcher) datePenalty(a, b *models.CanonicalMarket) float64 {
 	if !a.HasResolutionDate() || !b.HasResolutionDate() {
 		return 0
@@ -321,164 +368,9 @@ func (m *Matcher) datePenalty(a, b *models.CanonicalMarket) float64 {
 	return (deltaDays - maxDays) / maxDays
 }
 
-// ─── Stage 4: LLM disambiguation ─────────────────────────────────────────────
-
-// llmPairResult is the per-pair response from the LLM disambiguation call.
-type llmPairResult struct {
-	Index  int    `json:"index"`
-	Result string `json:"result"` // "match", "no_match", or "unsure"
-	Reason string `json:"reason"`
-}
-
-// disambiguateWithLLM sends ambiguous pairs to the OpenAI chat API in batches
-// and upgrades/downgrades confidence based on the LLM's verdict.
-//
-// Pairs are sent in batches of 20 to stay within token limits.
-// Any pair the LLM marks "match" is upgraded to ConfidenceMatch.
-// Any pair marked "no_match" is downgraded to ConfidenceNoMatch (filtered out).
-// "unsure" pairs remain as ConfidenceProbable.
-func (m *Matcher) disambiguateWithLLM(ctx context.Context, pairs []*MatchResult) []*MatchResult {
-	const batchSize = 20
-	const maxLLMPairs = 40 // cap to avoid excessive API calls
-
-	// Only send the top-scoring ambiguous pairs to the LLM
-	toProcess := pairs
-	if len(toProcess) > maxLLMPairs {
-		fmt.Printf("[matcher] LLM disambiguation: capping from %d to %d ambiguous pairs\n",
-			len(toProcess), maxLLMPairs)
-		toProcess = toProcess[:maxLLMPairs]
-	}
-
-	fmt.Printf("[matcher] LLM disambiguation: %d ambiguous pairs in batches of %d\n",
-		len(toProcess), batchSize)
-
-	// Start with a copy; pairs beyond maxLLMPairs are dropped (not enough
-	// confidence to include without LLM verification).
-	results := make([]*MatchResult, len(toProcess))
-	copy(results, toProcess)
-
-	// Fire all LLM batches concurrently
-	type batchResult struct {
-		start    int
-		end      int
-		verdicts []llmPairResult
-		err      error
-	}
-
-	var batches []batchResult
-	for start := 0; start < len(toProcess); start += batchSize {
-		end := start + batchSize
-		if end > len(toProcess) {
-			end = len(toProcess)
-		}
-		batches = append(batches, batchResult{start: start, end: end})
-	}
-
-	batchCh := make(chan batchResult, len(batches))
-	for _, b := range batches {
-		go func(start, end int) {
-			batch := toProcess[start:end]
-			fmt.Printf("[matcher] LLM batch %d-%d of %d...\n", start+1, end, len(toProcess))
-			batchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			verdicts, err := m.llmBatchCall(batchCtx, batch)
-			cancel()
-			batchCh <- batchResult{start: start, end: end, verdicts: verdicts, err: err}
-		}(b.start, b.end)
-	}
-
-	for range batches {
-		b := <-batchCh
-		if b.err != nil {
-			fmt.Printf("[matcher] WARNING: LLM disambiguation failed (batch %d-%d): %v — keeping as PROBABLE_MATCH\n", b.start+1, b.end, b.err)
-			continue
-		}
-		for _, v := range b.verdicts {
-			idx := b.start + v.Index
-			if idx >= len(results) {
-				continue
-			}
-			switch v.Result {
-			case "match":
-				results[idx].Confidence = ConfidenceMatch
-				results[idx].Explanation = fmt.Sprintf(
-					"LLM confirmed match: %s (fuzzy=%.2f, embedding=%.2f, composite=%.2f)",
-					v.Reason, results[idx].FuzzyScore, results[idx].EmbeddingScore, results[idx].CompositeScore)
-			case "no_match":
-				results[idx].Confidence = ConfidenceNoMatch
-				results[idx].Explanation = fmt.Sprintf("LLM rejected: %s", v.Reason)
-			default:
-				results[idx].Explanation = fmt.Sprintf(
-					"LLM unsure: %s (fuzzy=%.2f, embedding=%.2f, composite=%.2f)",
-					v.Reason, results[idx].FuzzyScore, results[idx].EmbeddingScore, results[idx].CompositeScore)
-			}
-		}
-	}
-
-	return results
-}
-
-// llmBatchCall sends a single batch of pairs to the chat API and parses the response.
-func (m *Matcher) llmBatchCall(ctx context.Context, pairs []*MatchResult) ([]llmPairResult, error) {
-	// Build the pair list for the prompt
-	var sb strings.Builder
-	for i, p := range pairs {
-		fmt.Fprintf(&sb, "%d. A: %q\n   B: %q\n", i, p.MarketA.Title, p.MarketB.Title)
-	}
-
-	prompt := fmt.Sprintf(`You are a prediction market equivalence classifier.
-
-For each numbered pair below, determine if market A and market B are asking the SAME binary yes/no question about the same real-world event.
-
-Rules:
-- "match" = same underlying question, same outcome (different phrasing is fine)
-- "no_match" = different questions or different outcomes
-- "unsure" = genuinely ambiguous
-
-Pairs:
-%s
-Respond with a JSON array only, no other text:
-[{"index": 0, "result": "match"|"no_match"|"unsure", "reason": "brief reason"}, ...]`, sb.String())
-
-	resp, err := m.openai.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: "gpt-4o-mini",
-		Messages: []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleUser, Content: prompt},
-		},
-		Temperature: 0,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("openai chat API: %w", err)
-	}
-
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("openai returned no choices")
-	}
-
-	content := strings.TrimSpace(resp.Choices[0].Message.Content)
-	// Strip markdown code fences if present
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimPrefix(content, "```")
-	content = strings.TrimSuffix(content, "```")
-	content = strings.TrimSpace(content)
-
-	var verdicts []llmPairResult
-	if err := json.Unmarshal([]byte(content), &verdicts); err != nil {
-		return nil, fmt.Errorf("parsing LLM response: %w\nraw: %s", err, content)
-	}
-
-	return verdicts, nil
-}
-
 // ─── Fuzzy title scoring ──────────────────────────────────────────────────────
 
 // fuzzyTitleScore returns a [0.0, 1.0] similarity score for two market titles.
-// It combines normalized edit distance with keyword Jaccard overlap, and applies
-// an entity mismatch penalty when titles share a structural pattern but differ
-// in the key entity (e.g., "Will X win Y" vs "Will Z win Y").
-//
-// The combined score = 0.5 * editSim + 0.5 * jaccardSim - entityPenalty
-// This balances character-level similarity (good for variants like "U.S." vs "US")
-// with semantic keyword overlap (good for paraphrased questions).
 func fuzzyTitleScore(a, b string) float64 {
 	na, nb := normTitle(a), normTitle(b)
 
@@ -487,9 +379,7 @@ func fuzzyTitleScore(a, b string) float64 {
 
 	base := 0.5*editSim + 0.5*jaccardSim
 
-	// Entity mismatch penalty: if titles are structurally similar (high Jaccard)
-	// but differ in a key named entity, they're likely different markets about
-	// different subjects (e.g., "Will Oprah win X" vs "Will LeBron win X").
+	// Entity mismatch penalty
 	penalty := entityMismatchPenalty(na, nb, jaccardSim)
 
 	score := base - penalty
@@ -500,14 +390,8 @@ func fuzzyTitleScore(a, b string) float64 {
 }
 
 // entityMismatchPenalty detects when two titles share a template but differ in
-// the subject entity. Returns a penalty in [0.0, 0.3] to subtract from the score.
-//
-// Example: "oprah winfrey win the 2028 democratic presidential nomination"
-//      vs  "hunter biden win the 2028 democratic presidential nomination"
-// These share 80%+ keywords but are about different people — NOT equivalent markets.
+// the subject entity.
 func entityMismatchPenalty(a, b string, jaccardSim float64) float64 {
-	// Only apply when titles are structurally similar (Jaccard > 0.5)
-	// but not identical
 	if jaccardSim < 0.5 || a == b {
 		return 0
 	}
@@ -515,7 +399,6 @@ func entityMismatchPenalty(a, b string, jaccardSim float64) float64 {
 	wordsA := strings.Fields(a)
 	wordsB := strings.Fields(b)
 
-	// Find words unique to each title (the "differing" parts)
 	setA := map[string]bool{}
 	setB := map[string]bool{}
 	for _, w := range wordsA {
@@ -537,11 +420,7 @@ func entityMismatchPenalty(a, b string, jaccardSim float64) float64 {
 		}
 	}
 
-	// If both titles have unique words (entity-like differences) and high overlap,
-	// this is a template match with different subjects
 	if len(onlyA) > 0 && len(onlyB) > 0 {
-		// The more shared words relative to unique words, the more likely it's
-		// a template mismatch (same question pattern, different entity)
 		shared := 0
 		for w := range setA {
 			if setB[w] {
@@ -552,7 +431,6 @@ func entityMismatchPenalty(a, b string, jaccardSim float64) float64 {
 		if shared > 0 && totalUnique > 0 {
 			templateRatio := float64(shared) / float64(shared+totalUnique)
 			if templateRatio > 0.6 {
-				// Strong template match with entity swap — heavy penalty
 				return 0.25
 			}
 			if templateRatio > 0.4 {
@@ -564,17 +442,96 @@ func entityMismatchPenalty(a, b string, jaccardSim float64) float64 {
 	return 0
 }
 
-// normTitle lowercases and strips punctuation for comparison.
+// normTitle lowercases, strips punctuation, normalizes numbers and synonyms for comparison.
 func normTitle(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder
 	for _, ch := range s {
-		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == ' ' {
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == ' ' || ch == '.' {
 			b.WriteRune(ch)
 		}
 	}
-	// Collapse multiple spaces
-	return strings.Join(strings.Fields(b.String()), " ")
+	result := strings.Join(strings.Fields(b.String()), " ")
+	result = normalizeNumbers(result)
+	result = applySynonyms(result)
+	return result
+}
+
+// normalizeNumbers converts shorthand like "100k", "1.5m", "2.5b" to plain integers.
+func normalizeNumbers(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		words[i] = normalizeNumberWord(w)
+	}
+	return strings.Join(words, " ")
+}
+
+func normalizeNumberWord(w string) string {
+	if len(w) == 0 {
+		return w
+	}
+	last := w[len(w)-1]
+	var multiplier float64
+	switch last {
+	case 'k':
+		multiplier = 1_000
+	case 'm':
+		multiplier = 1_000_000
+	case 'b':
+		multiplier = 1_000_000_000
+	default:
+		return w
+	}
+	numPart := w[:len(w)-1]
+	var val float64
+	n, err := fmt.Sscanf(numPart, "%f", &val)
+	if err != nil || n != 1 {
+		return w
+	}
+	return fmt.Sprintf("%d", int64(val*multiplier))
+}
+
+// synonyms maps common prediction-market terms to canonical forms.
+var synonyms = map[string]string{
+	"btc": "bitcoin", "eth": "ethereum", "xrp": "ripple",
+	"sol": "solana", "doge": "dogecoin", "ada": "cardano",
+	"gop": "republican", "dems": "democrat", "dem": "democrat",
+	"potus": "president", "scotus": "supreme court",
+	"fed": "federal reserve", "fomc": "federal reserve",
+	"gdp": "gross domestic product", "cpi": "consumer price index",
+	"pce": "personal consumption expenditures", "bps": "basis points",
+	"reaches": "reach", "reached": "reach", "reaching": "reach",
+	"wins": "win", "winning": "win", "won": "win",
+	"hits": "hit", "hitting": "hit",
+	"drops": "drop", "dropping": "drop", "dropped": "drop",
+	"rises": "rise", "rising": "rise",
+	"falls": "fall", "falling": "fall",
+	"cuts": "cut", "cutting": "cut",
+	"raises": "raise", "raising": "raise",
+	"exceeds": "exceed", "exceeding": "exceed", "exceeded": "exceed",
+	"impeached": "impeach", "impeaching": "impeach",
+	"resigned": "resign", "resigning": "resign",
+	"elected": "elect", "electing": "elect",
+	"approved": "approve", "approving": "approve",
+	"banned": "ban", "banning": "ban",
+	"passed": "pass", "passing": "pass",
+	"signed": "sign", "signing": "sign",
+	"launched": "launch", "launching": "launch",
+	"defaulted": "default", "defaulting": "default",
+	"rates": "rate", "prices": "price", "elections": "election",
+	"above": "reach", "below": "under",
+	"higher": "above", "lower": "below",
+	"over": "above", "greater": "above", "less": "below",
+}
+
+func applySynonyms(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if canonical, ok := synonyms[w]; ok {
+			words[i] = canonical
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // editSimilarity returns 1 - normalizedLevenshtein(a, b).
@@ -622,7 +579,10 @@ func keywords(s string) map[string]bool {
 		"will": true, "the": true, "a": true, "an": true, "be": true,
 		"is": true, "in": true, "on": true, "of": true, "to": true,
 		"by": true, "at": true, "or": true, "and": true, "for": true,
-		"win": true, "get": true, "have": true, "has": true, "its": true,
+		"get": true, "have": true, "has": true, "its": true,
+		"this": true, "that": true, "with": true, "from": true,
+		"what": true, "does": true, "do": true, "can": true,
+		"end": true, "year": true, "before": true, "after": true,
 	}
 	set := map[string]bool{}
 	for _, w := range strings.Fields(s) {
@@ -673,10 +633,8 @@ func min3(a, b, c int) int {
 	return c
 }
 
-// ─── Embedding cosine similarity ─────────────────────────────────────────────
-
 // cosineSimilarity computes the cosine similarity between two float32 vectors.
-// Returns a value in [-1.0, 1.0]; for well-formed embeddings, expect [0.0, 1.0].
+// Retained as a utility for potential future use.
 func cosineSimilarity(a, b []float32) float64 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0

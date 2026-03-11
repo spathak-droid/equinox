@@ -15,6 +15,7 @@ import (
 type RawMarket struct {
 	VenueID       models.VenueID
 	VenueMarketID string
+	FetchCategory string          // category used to fetch this market (set by BucketedFetcher)
 	Payload       json.RawMessage // verbatim JSON from venue
 }
 
@@ -46,4 +47,23 @@ type SearchableVenue interface {
 	// FetchMarketsByQuery searches for markets matching the given text query.
 	// The query is typically a market title from another venue.
 	FetchMarketsByQuery(ctx context.Context, query string) ([]*RawMarket, error)
+}
+
+// CategoryVenue extends Venue with category-based market fetching.
+// Each venue maps a normalized category name to its own API parameter
+// (e.g., Polymarket uses tag slugs, Kalshi uses series categories).
+type CategoryVenue interface {
+	Venue
+
+	// FetchMarketsByCategory returns active markets for a given normalized category.
+	// The category is a lowercase string like "politics", "crypto", "economics", "sports".
+	FetchMarketsByCategory(ctx context.Context, category string) ([]*RawMarket, error)
+}
+
+// CategoryVenueWithLimit extends CategoryVenue with configurable per-call limits.
+type CategoryVenueWithLimit interface {
+	CategoryVenue
+
+	// FetchMarketsByCategoryWithLimit returns active markets for a category with a per-call limit.
+	FetchMarketsByCategoryWithLimit(ctx context.Context, category string, limit int) ([]*RawMarket, error)
 }

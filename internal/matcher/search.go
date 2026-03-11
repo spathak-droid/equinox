@@ -24,70 +24,17 @@ type SearchCandidate struct {
 	Candidate *models.CanonicalMarket
 }
 
-// SearchQueryExtractor builds a search query from a CanonicalMarket title.
-// It strips prediction-market boilerplate to produce better search queries.
+// SearchQueryExtractor returns the best search query for a market.
+// For Kalshi markets with composite titles ("Event — Subtitle"), we use
+// the event title since that's the actual topic. For everything else,
+// we use the market title as-is and let the search APIs handle relevance.
 func SearchQueryExtractor(m *models.CanonicalMarket) string {
-	return cleanTitleForSearch(m.Title)
-}
-
-// cleanTitleForSearch removes common prediction-market phrasing that adds noise
-// to search queries without adding semantic value.
-func cleanTitleForSearch(title string) string {
-	t := strings.ToLower(strings.TrimSpace(title))
-
-	// Remove common question prefixes
-	prefixes := []string{
-		"will ",
-		"will the ",
-		"will a ",
-		"is ",
-		"are ",
-		"does ",
-		"do ",
-		"can ",
-		"should ",
-		"has ",
-		"have ",
-		"what is the probability that ",
-		"what are the chances that ",
-		"what is the chance that ",
+	// If we have a venue event title (e.g. Kalshi's event_title), prefer it
+	// as the search query — it's the clean topic without market-specific suffixes.
+	if m.VenueEventTitle != "" {
+		return strings.TrimSpace(m.VenueEventTitle)
 	}
-	for _, p := range prefixes {
-		if strings.HasPrefix(t, p) {
-			t = t[len(p):]
-			break
-		}
-	}
-
-	// Remove trailing question marks and common suffixes
-	t = strings.TrimRight(t, "?")
-	suffixes := []string{
-		" by end of year",
-		" by year end",
-		" before end of year",
-		" in 2024",
-		" in 2025",
-		" in 2026",
-		" this year",
-		" this month",
-	}
-	for _, s := range suffixes {
-		t = strings.TrimSuffix(t, s)
-	}
-
-	t = strings.TrimSpace(t)
-
-	// If the cleaned query is too short, use the original title
-	if len(t) < 5 {
-		return strings.TrimSpace(title)
-	}
-
-	// Capitalize first letter back for readability (search APIs may use it)
-	if len(t) > 0 {
-		t = strings.ToUpper(t[:1]) + t[1:]
-	}
-
-	return t
+	return strings.TrimSpace(m.Title)
 }
 
 // DeduplicatePairs removes duplicate match results (same market pair regardless of order).
@@ -208,72 +155,146 @@ func deduplicateSearchResults(searchResults []SearchResult) []SearchResult {
 	return out
 }
 
-// FindEquivalentPairsFromSearch scores pre-found search candidates using the
-// same 4-stage pipeline as brute-force, but only on the small candidate set
-// produced by cross-venue search.
-//
-// It deduplicates candidates before scoring: if 10 source markets all found the
-// same 2 candidates via search, only 2 unique pairs are scored (not 20).
+// FindEquivalentPairsFromSearch uses the LLM to match search candidates across venues.
+// It collects all unique cross-venue markets from search results, then sends them
+// to the LLM for pairwise comparison.
 func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResults []SearchResult) []*MatchResult {
-	// Deduplicate before scoring — this is where the 18/20 duplicate problem is fixed
+	// Collect unique markets per venue from search results
+	polyMap := map[string]*models.CanonicalMarket{}
+	kalshiMap := map[string]*models.CanonicalMarket{}
+
+	for _, sr := range searchResults {
+		addToVenueMap(sr.Source, polyMap, kalshiMap)
+		for _, c := range sr.Candidates {
+			addToVenueMap(c, polyMap, kalshiMap)
+		}
+	}
+
+	var polyMarkets, kalshiMarkets []*models.CanonicalMarket
+	for _, m := range polyMap {
+		polyMarkets = append(polyMarkets, m)
+	}
+	for _, m := range kalshiMap {
+		kalshiMarkets = append(kalshiMarkets, m)
+	}
+
+	fmt.Printf("[matcher/search] Unique markets: poly=%d kalshi=%d\n", len(polyMarkets), len(kalshiMarkets))
+
+	if len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
+		fmt.Printf("[matcher/search] No cross-venue pairs to compare\n")
+		return nil
+	}
+
+	// Use LLM matcher — each Poly market compared against all Kalshi in one call
+	llm := NewLLMMatcher()
+	if llm == nil {
+		fmt.Printf("[matcher/search] WARNING: OPENAI_API_KEY not set, falling back to fuzzy matching\n")
+		return m.fuzzyFallback(ctx, searchResults)
+	}
+
+	llmResults := llm.MatchAll(ctx, polyMarkets, kalshiMarkets)
+
+	// Convert LLM results to MatchResults, cross-validating with rule-based scores
+	var confirmed []*MatchResult
+	for _, lr := range llmResults {
+		// Run rule-based comparison to get real fuzzy/semantic scores
+		ruleResult := m.compare(lr.MarketA, lr.MarketB)
+
+		// Cross-validation: if the LLM says match but rule-based scores are very low,
+		// the LLM is probably wrong (same topic, different specific question).
+		llmConf := lr.Confidence
+		realFuzzy := ruleResult.FuzzyScore
+		realEntity := ruleResult.EntityOverlapScore
+		if realEntity < 0 {
+			realEntity = 0
+		}
+
+		// Compute effective confidence: blend LLM with rule-based signals
+		// If fuzzy < 0.3 and entity overlap < 0.4, the titles are clearly different
+		// questions — override the LLM regardless of its confidence.
+		effectiveConf := llmConf
+		if realFuzzy < 0.30 && realEntity < 0.40 {
+			effectiveConf = 0.0 // hard reject: titles too different
+			fmt.Printf("[matcher/search] VETOED by rules: LLM=%.2f but fuzzy=%.2f entity=%.2f | %q vs %q\n",
+				llmConf, realFuzzy, realEntity, lr.MarketA.Title, lr.MarketB.Title)
+		} else if realFuzzy < 0.45 {
+			// Moderate penalty: reduce LLM confidence proportionally
+			effectiveConf = llmConf * (realFuzzy / 0.45)
+			fmt.Printf("[matcher/search] Downgraded: LLM=%.2f → %.2f (fuzzy=%.2f) | %q vs %q\n",
+				llmConf, effectiveConf, realFuzzy, lr.MarketA.Title, lr.MarketB.Title)
+		}
+
+		confidence := ConfidenceNoMatch
+		if effectiveConf >= 0.8 {
+			confidence = ConfidenceMatch
+		} else if effectiveConf >= 0.5 {
+			confidence = ConfidenceProbable
+		}
+
+		result := &MatchResult{
+			MarketA:             lr.MarketA,
+			MarketB:             lr.MarketB,
+			Confidence:          confidence,
+			CompositeScore:      effectiveConf,
+			FuzzyScore:          realFuzzy,
+			EmbeddingScore:      -1,
+			EventMatchScore:     ruleResult.EventMatchScore,
+			EntityOverlapScore:  realEntity,
+			DateProximityScore:  ruleResult.DateProximityScore,
+			PriceProximityScore: ruleResult.PriceProximityScore,
+			Explanation:         fmt.Sprintf("LLM confidence=%.2f (effective=%.2f): %s", llmConf, effectiveConf, lr.Reasoning),
+		}
+
+		if confidence != ConfidenceNoMatch {
+			confirmed = append(confirmed, result)
+			fmt.Printf("[matcher/search] %s — %s vs %s (eff=%.2f, fuzzy=%.2f): %s | %s\n",
+				confidence, lr.MarketA.VenueID, lr.MarketB.VenueID, effectiveConf,
+				realFuzzy, lr.MarketA.Title, lr.Reasoning)
+		}
+	}
+
+	// Dedup (same pair found from both directions)
+	confirmed = DeduplicatePairs(confirmed)
+
+	return confirmed
+}
+
+func addToVenueMap(m *models.CanonicalMarket, polyMap, kalshiMap map[string]*models.CanonicalMarket) {
+	switch m.VenueID {
+	case models.VenuePolymarket:
+		polyMap[m.VenueMarketID] = m
+	case models.VenueKalshi:
+		kalshiMap[m.VenueMarketID] = m
+	}
+}
+
+// fuzzyFallback uses the old rule-based matching when no LLM is available.
+func (m *Matcher) fuzzyFallback(ctx context.Context, searchResults []SearchResult) []*MatchResult {
 	deduped := deduplicateSearchResults(searchResults)
 
 	totalPairs := 0
 	for _, sr := range deduped {
 		totalPairs += len(sr.Candidates)
 	}
-	fmt.Printf("[matcher/search] Scoring %d unique search-candidate pairs (deduplicated from %d raw)...\n",
-		totalPairs, countRawPairs(searchResults))
+	fmt.Printf("[matcher/search] Fuzzy fallback: scoring %d pairs...\n", totalPairs)
 
 	var confirmed []*MatchResult
-	var ambiguous []*MatchResult
-
 	for _, sr := range deduped {
 		for _, candidate := range sr.Candidates {
 			result := m.compare(sr.Source, candidate)
-			switch result.Confidence {
-			case ConfidenceMatch:
+			if result.Confidence == ConfidenceMatch ||
+				(result.Confidence == ConfidenceProbable && result.CompositeScore >= m.cfg.MatchThreshold) {
 				confirmed = append(confirmed, result)
-			case ConfidenceProbable:
-				ambiguous = append(ambiguous, result)
 			}
 		}
 	}
 
-	fmt.Printf("[matcher/search] Stages 1-3 complete: %d confirmed, %d ambiguous, %d rejected\n",
-		len(confirmed), len(ambiguous), totalPairs-len(confirmed)-len(ambiguous))
-
-	// Stage 4: LLM disambiguation for ambiguous pairs
-	if m.openai != nil && len(ambiguous) > 0 {
-		resolved := m.disambiguateWithLLM(ctx, ambiguous)
-		for _, r := range resolved {
-			if r.Confidence != ConfidenceNoMatch {
-				confirmed = append(confirmed, r)
-			}
-		}
-	} else if len(ambiguous) > 0 {
-		fmt.Printf("[matcher/search] No LLM available — filtering %d ambiguous pairs (keeping composite >= %.2f)\n",
-			len(ambiguous), m.cfg.MatchThreshold)
-		for _, r := range ambiguous {
-			if r.CompositeScore >= m.cfg.MatchThreshold {
-				confirmed = append(confirmed, r)
-			}
-		}
-	}
-
-	// Final dedup (same pair found from both search directions A→B and B→A)
 	confirmed = DeduplicatePairs(confirmed)
 
-	// Sort by composite score descending
 	for i := 1; i < len(confirmed); i++ {
 		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
 			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
 		}
-	}
-
-	for _, r := range confirmed {
-		fmt.Printf("[matcher/search] %s — %s vs %s (score=%.3f): %s\n",
-			r.Confidence, r.MarketA.VenueID, r.MarketB.VenueID, r.CompositeScore, r.Explanation)
 	}
 
 	return confirmed

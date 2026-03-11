@@ -11,8 +11,10 @@
 .equinox_embedding_cache.json
 
 # Binaries
+/equinox
 /equinox-ui
 bin/
+tmp/
 *.exe
 
 # IDE / editor

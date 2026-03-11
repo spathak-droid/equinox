@@ -1,0 +1,17 @@
+# Air configuration for live-reloading equinox-ui
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/equinox-ui ./cmd/equinox-ui"
+  bin = "./tmp/equinox-ui"
+  full_bin = "./tmp/equinox-ui"
+  include_ext = ["go", "html", "tmpl"]
+  exclude_dir = ["tmp", "vendor", "_ext_prediction_market_analysis", "testdata"]
+  delay = 1000 # ms after change before rebuilding
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

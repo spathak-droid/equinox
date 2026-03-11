@@ -1,27 +1,14 @@
 // Package normalizer transforms venue-specific RawMarkets into CanonicalMarkets.
 // It is the only package allowed to contain venue-specific parsing logic.
-//
-// The normalizer also optionally enriches canonical markets with AI embeddings
-// by calling the OpenAI Embeddings API. When no API key is configured, this step
-// is silently skipped and the matcher falls back to rule-based scoring.
-// Optional embedding cache can persist vectors by normalized title text to avoid
-// repeat calls across repeated runs.
 package normalizer
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	openai "github.com/sashabaranov/go-openai"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
@@ -32,34 +19,15 @@ import (
 
 // Normalizer converts RawMarkets into CanonicalMarkets.
 type Normalizer struct {
-	cfg    *config.Config
-	openai *openai.Client // nil when no API key is set
-
-	embeddingCache *embeddingCache
+	cfg *config.Config
 }
 
-// New creates a Normalizer. If cfg.OpenAIAPIKey is empty, embedding enrichment is disabled.
+// New creates a Normalizer.
 func New(cfg *config.Config) *Normalizer {
-	n := &Normalizer{cfg: cfg}
-	if cfg.OpenAIAPIKey != "" {
-		openaiCfg := openai.DefaultConfig(cfg.OpenAIAPIKey)
-		openaiCfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
-		n.openai = openai.NewClientWithConfig(openaiCfg)
-	}
-	if cfg.EmbeddingCacheEnabled {
-		n.embeddingCache = &embeddingCache{
-			Entries: map[string][]float32{},
-		}
-		if err := n.loadEmbeddingCache(); err != nil {
-			fmt.Printf("[normalizer] WARNING: embedding cache unavailable: %v — continuing without cache\n", err)
-			n.embeddingCache = &embeddingCache{Entries: map[string][]float32{}}
-		}
-	}
-	return n
+	return &Normalizer{cfg: cfg}
 }
 
-// Normalize converts a batch of RawMarkets from a single venue into CanonicalMarkets,
-// then optionally enriches them with embeddings in a single batched API call.
+// Normalize converts a batch of RawMarkets from a single venue into CanonicalMarkets.
 func (n *Normalizer) Normalize(ctx context.Context, raw []*venues.RawMarket) ([]*models.CanonicalMarket, error) {
 	canonical := make([]*models.CanonicalMarket, 0, len(raw))
 
@@ -85,14 +53,6 @@ func (n *Normalizer) Normalize(ctx context.Context, raw []*venues.RawMarket) ([]
 		canonical = append(canonical, m)
 	}
 
-	// Enrich with embeddings if an OpenAI client is available.
-	if n.openai != nil {
-		if err := n.enrichWithEmbeddings(ctx, canonical); err != nil {
-			// Embedding failure is non-fatal — log and continue without embeddings.
-			fmt.Printf("[normalizer] WARNING: embedding enrichment failed: %v — falling back to rule-only matching\n", err)
-		}
-	}
-
 	return canonical, nil
 }
 
@@ -110,6 +70,10 @@ type polymarketRaw struct {
 	Liquidity     string `json:"liquidity"`     // API returns string
 	LiquidityNum  float64 `json:"liquidityNum"`
 	Category      string `json:"category"`
+	// public-search fields (not present in /markets endpoint)
+	BestBid       float64 `json:"bestBid"`
+	BestAsk       float64 `json:"bestAsk"`
+	Spread        float64 `json:"spread"`
 	Tags          []struct {
 		Label string `json:"label"`
 	} `json:"tags"`
@@ -130,10 +94,16 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		eventSlug = raw.Events[0].Slug
 	}
 
+	// public-search has no "id" field, use slug as fallback
+	marketID := raw.ID
+	if marketID == "" {
+		marketID = raw.Slug
+	}
+
 	m := &models.CanonicalMarket{
 		ID:               uuid.NewString(),
 		VenueID:          models.VenuePolymarket,
-		VenueMarketID:    raw.ID,
+		VenueMarketID:    marketID,
 		VenueEventTicker: eventSlug,
 		VenueSlug:        raw.Slug,
 		Title:            raw.Question,
@@ -178,9 +148,16 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 			no, _ := strconv.ParseFloat(prices[1], 64)
 			m.YesPrice = yes
 			m.NoPrice = no
-			// Spread is not directly available from Polymarket's summary endpoint
-			// Assumption: we set spread to 0 and note it in docs as a known limitation
-			m.Spread = 0
+		}
+	}
+
+	// public-search provides bestBid/bestAsk/spread directly — use as fallback or override
+	if raw.BestBid > 0 || raw.BestAsk > 0 {
+		m.Spread = raw.Spread
+		// If outcomePrices didn't give us prices, use bestBid/bestAsk midpoint
+		if m.YesPrice == 0 && raw.BestBid > 0 {
+			m.YesPrice = (raw.BestBid + raw.BestAsk) / 2
+			m.NoPrice = 1 - m.YesPrice
 		}
 	}
 
@@ -222,6 +199,13 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 	// Kalshi spread = ask - bid for the YES side
 	yesSpread := float64(raw.YesAsk-raw.YesBid) / 100.0
 
+	// Use the fetch category if provided (from category-bucketed fetch),
+	// otherwise fall back to "other"
+	cat := "other"
+	if r.FetchCategory != "" {
+		cat = models.NormalizeCategory(strings.ToLower(r.FetchCategory))
+	}
+
 	m := &models.CanonicalMarket{
 		ID:                uuid.NewString(),
 		VenueID:           models.VenueKalshi,
@@ -229,9 +213,9 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		VenueEventTicker:  raw.EventTicker,
 		VenueSeriesTicker: raw.SeriesTicker,
 		VenueEventTitle:   raw.EventTitle,
-		Title:             raw.Title,
+		Title:             kalshiCanonicalTitle(raw.EventTitle, raw.Subtitle),
 		Description:   raw.Subtitle,
-		Category:      "other",
+		Category:      cat,
 		YesPrice:      yesMid,
 		NoPrice:       noMid,
 		Spread:        yesSpread,
@@ -265,6 +249,22 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 	return m, nil
 }
 
+// kalshiCanonicalTitle builds a full descriptive title for a Kalshi market.
+// Combines the event title with the market subtitle (e.g. "Champions League Winner — Arsenal").
+func kalshiCanonicalTitle(eventTitle, subtitle string) string {
+	event := strings.TrimSpace(eventTitle)
+	sub := strings.TrimSpace(subtitle)
+
+	if event == "" {
+		return sub
+	}
+	if sub == "" {
+		return event
+	}
+
+	return event + " — " + sub
+}
+
 // estimateKalshiLiquidity derives a liquidity proxy from volume and spread
 // because Kalshi's public API returns liquidity=0 for all markets.
 // Formula: volume × (1 - spread), so high-volume tight-spread markets rank highest.
@@ -279,167 +279,3 @@ func estimateKalshiLiquidity(raw kalshiRaw) float64 {
 	}
 	return vol * (1 - spread)
 }
-
-// ─── Embedding enrichment ─────────────────────────────────────────────────────
-
-// embeddingBatchSize controls how many titles are sent in each OpenAI API call.
-// Smaller batches are more resilient and show progress; 50 is a good balance.
-const embeddingBatchSize = 50
-
-// enrichWithEmbeddings calls the OpenAI Embeddings API in batches and attaches
-// the resulting vectors. Cached embeddings are served from disk when available.
-func (n *Normalizer) enrichWithEmbeddings(ctx context.Context, markets []*models.CanonicalMarket) error {
-	if len(markets) == 0 {
-		return nil
-	}
-
-	type pendingItem struct {
-		index int // index into markets slice
-		text  string
-		key   string // cache key (empty if cache disabled)
-	}
-
-	// Resolve cache hits first
-	var pending []pendingItem
-	cacheHits := 0
-	for i, market := range markets {
-		text := market.EmbeddingText()
-		if n.embeddingCache != nil {
-			key := embeddingCacheKey(n.cfg.EmbeddingModel, text)
-			if cached, ok := n.embeddingCache.Entries[key]; ok {
-				market.TitleEmbedding = append([]float32(nil), cached...)
-				cacheHits++
-				continue
-			}
-			pending = append(pending, pendingItem{index: i, text: text, key: key})
-		} else {
-			pending = append(pending, pendingItem{index: i, text: text})
-		}
-	}
-
-	if cacheHits > 0 {
-		fmt.Printf("[normalizer] Embedding cache: %d/%d hits\n", cacheHits, len(markets))
-	}
-
-	if len(pending) == 0 {
-		return nil
-	}
-
-	fmt.Printf("[normalizer] Fetching %d embeddings from OpenAI (batch size %d)...\n",
-		len(pending), embeddingBatchSize)
-
-	// Fire all embedding batches concurrently
-	type embBatchResult struct {
-		start int
-		end   int
-		resp  openai.EmbeddingResponse
-		err   error
-	}
-
-	var batchSpecs []embBatchResult
-	for start := 0; start < len(pending); start += embeddingBatchSize {
-		end := start + embeddingBatchSize
-		if end > len(pending) {
-			end = len(pending)
-		}
-		batchSpecs = append(batchSpecs, embBatchResult{start: start, end: end})
-	}
-
-	ch := make(chan embBatchResult, len(batchSpecs))
-	for _, bs := range batchSpecs {
-		go func(start, end int) {
-			batch := pending[start:end]
-			texts := make([]string, len(batch))
-			for i, p := range batch {
-				texts[i] = p.text
-			}
-			fmt.Printf("[normalizer] Embedding batch %d-%d of %d...\n", start+1, end, len(pending))
-			resp, err := n.openai.CreateEmbeddings(ctx, openai.EmbeddingRequestStrings{
-				Model: openai.EmbeddingModel(n.cfg.EmbeddingModel),
-				Input: texts,
-			})
-			ch <- embBatchResult{start: start, end: end, resp: resp, err: err}
-		}(bs.start, bs.end)
-	}
-
-	updated := false
-	for range batchSpecs {
-		br := <-ch
-		if br.err != nil {
-			return fmt.Errorf("openai embeddings API (batch %d-%d): %w", br.start+1, br.end, br.err)
-		}
-		batch := pending[br.start:br.end]
-		for _, emb := range br.resp.Data {
-			if emb.Index >= len(batch) {
-				continue
-			}
-			p := batch[emb.Index]
-			markets[p.index].TitleEmbedding = emb.Embedding
-			if n.embeddingCache != nil && p.key != "" {
-				n.embeddingCache.Entries[p.key] = append([]float32(nil), emb.Embedding...)
-				updated = true
-			}
-		}
-	}
-
-	if updated {
-		if err := n.persistEmbeddingCache(); err != nil {
-			fmt.Printf("[normalizer] WARNING: failed to write embedding cache: %v\n", err)
-		} else {
-			fmt.Printf("[normalizer] Embedding cache saved (%d entries)\n", len(n.embeddingCache.Entries))
-		}
-	}
-
-	return nil
-}
-
-type embeddingCache struct {
-	Entries map[string][]float32 `json:"entries"`
-}
-
-func embeddingCacheKey(model string, text string) string {
-	sum := sha1.Sum([]byte(strings.ToLower(strings.TrimSpace(text)) + "|" + model))
-	return hex.EncodeToString(sum[:])
-}
-
-func (n *Normalizer) loadEmbeddingCache() error {
-	if n.cfg.EmbeddingCachePath == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(n.cfg.EmbeddingCachePath)
-	if err != nil {
-		// missing cache file is expected on first run
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("reading cache file %q: %w", n.cfg.EmbeddingCachePath, err)
-	}
-
-	var cache embeddingCache
-	if err := json.Unmarshal(raw, &cache); err != nil {
-		return fmt.Errorf("parsing cache file %q: %w", n.cfg.EmbeddingCachePath, err)
-	}
-	if cache.Entries == nil {
-		cache.Entries = map[string][]float32{}
-	}
-	n.embeddingCache = &cache
-	return nil
-}
-
-func (n *Normalizer) persistEmbeddingCache() error {
-	if n.cfg.EmbeddingCachePath == "" || n.embeddingCache == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(n.cfg.EmbeddingCachePath), 0o755); err != nil {
-		return fmt.Errorf("creating cache directory for %q: %w", n.cfg.EmbeddingCachePath, err)
-	}
-	body, err := json.Marshal(n.embeddingCache)
-	if err != nil {
-		return fmt.Errorf("serializing embedding cache: %w", err)
-	}
-	if err := os.WriteFile(n.cfg.EmbeddingCachePath, body, 0o644); err != nil {
-		return fmt.Errorf("writing cache file %q: %w", n.cfg.EmbeddingCachePath, err)
-	}
-	return nil
-}
-

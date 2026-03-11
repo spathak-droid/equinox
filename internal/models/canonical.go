@@ -34,7 +34,6 @@ const (
 //     Polymarket uses cents (0–100), Kalshi uses cents too but with different field names.
 //     By converting both to float [0,1] here, the router never needs to know the source format.
 //   - ResolutionDate is a pointer to handle markets with no defined expiry (e.g. Manifold).
-//   - TitleEmbedding is populated lazily by the normalizer only when an AI key is present.
 //   - RawPayload is retained verbatim for debugging and auditability. It is never read
 //     by the matcher or router.
 type CanonicalMarket struct {
@@ -74,23 +73,16 @@ type CanonicalMarket struct {
 	CreatedAt time.Time    `json:"created_at"`
 	UpdatedAt time.Time    `json:"updated_at"`
 
-	// --- AI features ---
-	// TitleEmbedding holds an OpenAI text-embedding-3-small vector (1536 dims).
-	// Populated by the Normalizer when OPENAI_API_KEY is set.
-	// If nil, the matcher falls back to rule-based scoring only.
-	TitleEmbedding []float32 `json:"title_embedding,omitempty"`
+	// --- Semantic signature ---
+	// SemanticSignature is a deterministic hash of the extracted event structure.
+	// Populated by the matcher during comparison. Two markets with the same
+	// non-empty signature are asking the exact same question (Stage 0 instant match).
+	SemanticSignature string `json:"semantic_signature,omitempty"`
 
 	// --- Audit trail ---
 	// RawPayload is the unmodified JSON from the venue API.
 	// Never used by matching or routing logic — only for debugging.
 	RawPayload json.RawMessage `json:"raw_payload,omitempty"`
-}
-
-// EmbeddingText returns the string that should be embedded for this market.
-// We use only the title so that cross-venue description differences don't
-// pollute the embedding similarity signal.
-func (m *CanonicalMarket) EmbeddingText() string {
-	return m.Title
 }
 
 // HasResolutionDate returns true when a resolution date is known.

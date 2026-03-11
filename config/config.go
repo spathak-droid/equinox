@@ -4,16 +4,12 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // Config holds all runtime configuration for Equinox.
 // Values are loaded from environment variables so no secrets are hardcoded.
 type Config struct {
-	// OpenAI — used for embedding-based equivalence matching
-	OpenAIAPIKey string
-
 	// Venue API keys (Kalshi requires auth; Polymarket public API does not)
 	KalshiAPIKey string
 
@@ -37,21 +33,30 @@ type Config struct {
 	// DefaultOrderSize: hypothetical order size in USD used by the routing simulator
 	DefaultOrderSize float64
 
-	// Embedding model — OpenAI model name
-	EmbeddingModel string
-	// Embedding cache
-	EmbeddingCacheEnabled bool
-	EmbeddingCachePath    string
-
 	// HTTP timeout for venue API calls
 	HTTPTimeout time.Duration
+
+	// Per-venue market limits (0 = unlimited, fetch everything)
+	PolymarketMaxMarkets int
+	KalshiMaxMarkets     int
+
+	// Venue search API URLs
+	PolymarketSearchAPI string
+	KalshiSearchAPI     string
+
+	// Fetch strategy: "category", "search", or "broad"
+	FetchStrategy string
+	// Markets per category when using category-bucketed fetch (default 50)
+	MarketsPerCategory int
+	// Max concurrent HTTP calls during category fetch (default 4)
+	FetchConcurrency int
+	// Rate limit delay in ms between category fetch calls (default 500)
+	FetchRateLimitMs int
 }
 
 // Load reads configuration from environment variables and applies defaults.
 func Load() (*Config, error) {
 	cfg := &Config{
-		// Secrets
-		OpenAIAPIKey: os.Getenv("OPENAI_API_KEY"),
 		KalshiAPIKey: os.Getenv("KALSHI_API_KEY"),
 
 		// Defaults — overridable via env
@@ -64,10 +69,17 @@ func Load() (*Config, error) {
 		SpreadWeight:    envFloat("SPREAD_WEIGHT", 0.10),
 
 		DefaultOrderSize: envFloat("DEFAULT_ORDER_SIZE", 1000.0),
-		EmbeddingModel:   envString("EMBEDDING_MODEL", "text-embedding-3-small"),
-		EmbeddingCacheEnabled: envBool("EMBEDDING_CACHE_ENABLED", false),
-		EmbeddingCachePath:    envString("EMBEDDING_CACHE_PATH", ".equinox_embedding_cache.json"),
-		HTTPTimeout:      time.Duration(envInt("HTTP_TIMEOUT_SECONDS", 30)) * time.Second,
+		HTTPTimeout:          time.Duration(envInt("HTTP_TIMEOUT_SECONDS", 30)) * time.Second,
+		PolymarketMaxMarkets: envInt("POLYMARKET_MAX_MARKETS", 0),
+		KalshiMaxMarkets:     envInt("KALSHI_MAX_MARKETS", 0),
+
+		PolymarketSearchAPI: envString("POLYMARKET_SEARCH_API", "https://gamma-api.polymarket.com/public-search"),
+		KalshiSearchAPI:     envString("KALSHI_SEARCH_API", "https://api.elections.kalshi.com/v1/search/series"),
+
+		FetchStrategy:      envString("FETCH_STRATEGY", "category"),
+		MarketsPerCategory: envInt("MARKETS_PER_CATEGORY", 50),
+		FetchConcurrency:   envInt("FETCH_CONCURRENCY", 4),
+		FetchRateLimitMs:   envInt("FETCH_RATE_LIMIT_MS", 500),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -84,10 +96,6 @@ func (c *Config) validate() error {
 	if c.MatchThreshold <= c.ProbableMatchThreshold {
 		return fmt.Errorf("MATCH_THRESHOLD (%.2f) must be > PROBABLE_MATCH_THRESHOLD (%.2f)",
 			c.MatchThreshold, c.ProbableMatchThreshold)
-	}
-	if c.OpenAIAPIKey == "" {
-		// Non-fatal: system will fall back to rule-only matching
-		fmt.Println("[config] WARNING: OPENAI_API_KEY not set — embedding matching disabled, using rules only")
 	}
 	return nil
 }
@@ -117,10 +125,3 @@ func envString(key, def string) string {
 	return def
 }
 
-func envBool(key string, def bool) bool {
-	if v := os.Getenv(key); v != "" {
-		l := strings.ToLower(strings.TrimSpace(v))
-		return l == "1" || l == "true" || l == "yes" || l == "on"
-	}
-	return def
-}
