@@ -62,6 +62,7 @@ type PageData struct {
 	ProbableCount    int
 	DiagnosisMessage string
 	HasQuery         bool
+	DeepSearch       bool
 }
 
 // PairView is a single matched pair ready for rendering.
@@ -81,6 +82,7 @@ type PairView struct {
 type MarketView struct {
 	Venue              string  `json:"venue"`
 	VenueMarketID      string  `json:"venue_market_id"`
+	VenueYesTokenID    string  `json:"venue_yes_token_id,omitempty"`
 	Title              string  `json:"title"`
 	Category           string  `json:"category"`
 	Status             string  `json:"status"`
@@ -126,23 +128,28 @@ func main() {
 			return
 		}
 		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		deepSearch := r.URL.Query().Get("more") == "1"
+		cacheKey := query
+		if deepSearch {
+			cacheKey = query + "|more=1"
+		}
 
 		var data *PageData
 		if query == "" {
 			data = &PageData{VenueCounts: map[models.VenueID]int{}}
 		} else {
 			// Check short-lived cache populated by /stream
-			if v, ok := resultCache.Load(query); ok {
+			if v, ok := resultCache.Load(cacheKey); ok {
 				cr := v.(*cachedResult)
 				if time.Now().Before(cr.expiresAt) {
 					data = cr.data
 				} else {
-					resultCache.Delete(query)
+					resultCache.Delete(cacheKey)
 				}
 			}
 			if data == nil {
-				fmt.Printf("[equinox-ui] Running search pipeline q=%q\n", query)
-				data, err = runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, nil)
+				fmt.Printf("[equinox-ui] Running search pipeline q=%q deep=%t\n", query, deepSearch)
+				data, err = runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, deepSearch, nil)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -161,6 +168,11 @@ func main() {
 	// caches the result so the subsequent GET / is served instantly.
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		deepSearch := r.URL.Query().Get("more") == "1"
+		cacheKey := query
+		if deepSearch {
+			cacheKey = query + "|more=1"
+		}
 		if query == "" {
 			http.Error(w, "missing q", http.StatusBadRequest)
 			return
@@ -184,14 +196,14 @@ func main() {
 			mu.Unlock()
 		}
 
-		data, pipelineErr := runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, emit)
+		data, pipelineErr := runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, deepSearch, emit)
 		if pipelineErr != nil {
 			emit(progressEvent{Type: "error", Msg: pipelineErr.Error()})
 			return
 		}
 
 		// Cache result so the redirect GET / is instant
-		resultCache.Store(query, &cachedResult{
+		resultCache.Store(cacheKey, &cachedResult{
 			data:      data,
 			expiresAt: time.Now().Add(2 * time.Minute),
 		})
@@ -206,73 +218,177 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// runSearchPipelineWithProgress searches both venues for a query, cross-matches,
-// and optionally emits SSE progress events via the emit callback (nil = silent).
-func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, query string, emit func(progressEvent)) (*PageData, error) {
+// maxPages is the maximum number of API pages to fetch per venue per query.
+// After maxPages we stop paginating regardless of match count.
+const maxPages = 3
+const maxPagesDeep = 8
+
+// runSearchPipelineWithProgress fetches paged search results from both venues
+// and returns the best cross-venue pairs found.
+// In default mode it stops after the first non-empty pair set.
+// In deep-search mode it keeps paginating to grow the market pool.
+func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, query string, deepSearch bool, emit func(progressEvent)) (*PageData, error) {
 	if emit == nil {
-		emit = func(progressEvent) {} // no-op when called without SSE
+		emit = func(progressEvent) {}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching markets for \"%s\"...", query)})
-
-	var polyRaw, kalshiRaw []*venues.RawMarket
-	var polyErr, kalshiErr error
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		polyRaw, polyErr = polyClient.FetchMarketsByQuery(ctx, query)
-	}()
-	go func() {
-		defer wg.Done()
-		kalshiRaw, kalshiErr = kalshiClient.FetchMarketsByQuery(ctx, query)
-	}()
-	wg.Wait()
-
-	if polyErr != nil {
-		fmt.Printf("[equinox-ui] WARNING: skipping polymarket: %v\n", polyErr)
-		emit(progressEvent{Type: "result", Msg: "Polymarket unavailable", Venue: "polymarket"})
-	} else {
-		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Polymarket: %d markets", len(polyRaw)), Count: len(polyRaw), Venue: "polymarket"})
-	}
-	if kalshiErr != nil {
-		fmt.Printf("[equinox-ui] WARNING: skipping kalshi: %v\n", kalshiErr)
-		emit(progressEvent{Type: "result", Msg: "Kalshi unavailable", Venue: "kalshi"})
-	} else {
-		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Kalshi: %d markets", len(kalshiRaw)), Count: len(kalshiRaw), Venue: "kalshi"})
-	}
-
-	emit(progressEvent{Type: "step", Msg: "Normalizing market data..."})
 	norm := normalizer.New(cfg)
-	polyMarkets, _ := norm.Normalize(ctx, polyRaw)
-	kalshiMarkets, _ := norm.Normalize(ctx, kalshiRaw)
-
-	venueCounts := map[models.VenueID]int{
-		models.VenuePolymarket: len(polyMarkets),
-		models.VenueKalshi:     len(kalshiMarkets),
-	}
-
-	emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Running cross-venue matching (%d × %d pairs)...", len(polyMarkets), len(kalshiMarkets))})
-
-	var searchResults []matcher.SearchResult
-	for _, pm := range polyMarkets {
-		searchResults = append(searchResults, matcher.SearchResult{
-			Source:     pm,
-			Candidates: kalshiMarkets,
-		})
-	}
-	for _, km := range kalshiMarkets {
-		searchResults = append(searchResults, matcher.SearchResult{
-			Source:     km,
-			Candidates: polyMarkets,
-		})
-	}
-
 	m := matcher.New(cfg)
-	pairs := m.FindEquivalentPairsFromSearch(ctx, searchResults)
+
+	var allPolyMarkets, allKalshiMarkets []*models.CanonicalMarket
+	seenPoly := map[string]bool{}
+	seenKalshi := map[string]bool{}
+
+	polyOffset := 0
+	kalshiCursor := ""
+	polyDone := false
+	kalshiDone := false
+	page := 0
+	stagnationPages := 0
+	var pairs []*matcher.MatchResult
+
+	pageLimit := maxPages
+	if deepSearch {
+		pageLimit = maxPagesDeep
+	}
+	// Default mode stops after first non-empty result set; deep mode keeps
+	// paginating to expand the market pool and potentially find better matches.
+	for (deepSearch || len(pairs) == 0) && !(polyDone && kalshiDone) && page < pageLimit {
+		page++
+		emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching page %d for \"%s\"...", page, query)})
+
+		var wg sync.WaitGroup
+		var polyRaw, kalshiRaw []*venues.RawMarket
+		var nextPolyOffset int
+		var nextKalshiCursor string
+
+		if !polyDone {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var err error
+				polyRaw, nextPolyOffset, err = polyClient.FetchMarketsByQueryPaged(ctx, query, polyOffset)
+				if err != nil {
+					fmt.Printf("[equinox-ui] WARNING: polymarket page %d: %v\n", page, err)
+				}
+				if nextPolyOffset == 0 {
+					polyDone = true
+				}
+			}()
+		}
+		if !kalshiDone {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var err error
+				kalshiRaw, nextKalshiCursor, err = kalshiClient.FetchMarketsByQueryPaged(ctx, query, kalshiCursor, 100)
+				if err != nil {
+					fmt.Printf("[equinox-ui] WARNING: kalshi page %d: %v\n", page, err)
+				}
+				if nextKalshiCursor == "" {
+					kalshiDone = true
+				}
+			}()
+		}
+		wg.Wait()
+
+		polyOffset = nextPolyOffset
+		kalshiCursor = nextKalshiCursor
+
+		// Normalize and deduplicate new markets
+		newPoly, _ := norm.Normalize(ctx, polyRaw)
+		newKalshi, _ := norm.Normalize(ctx, kalshiRaw)
+		addedPoly := 0
+		addedKalshi := 0
+		for _, mm := range newPoly {
+			if !seenPoly[mm.VenueMarketID] {
+				seenPoly[mm.VenueMarketID] = true
+				allPolyMarkets = append(allPolyMarkets, mm)
+				addedPoly++
+			}
+		}
+		for _, mm := range newKalshi {
+			if !seenKalshi[mm.VenueMarketID] {
+				seenKalshi[mm.VenueMarketID] = true
+				allKalshiMarkets = append(allKalshiMarkets, mm)
+				addedKalshi++
+			}
+		}
+
+		emit(progressEvent{Type: "result",
+			Msg:   fmt.Sprintf("Pool: %d poly, %d kalshi markets", len(allPolyMarkets), len(allKalshiMarkets)),
+			Count: len(allPolyMarkets) + len(allKalshiMarkets),
+		})
+
+		// Cross-pollinate on accumulated pool
+		pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets)
+		fmt.Printf("[equinox-ui] Page %d: pool poly=%d kalshi=%d → %d pairs\n",
+			page, len(allPolyMarkets), len(allKalshiMarkets), len(pairs))
+
+		// Deep mode can hit venue-side pagination loops that return the same set.
+		// Stop after repeated no-growth pages and switch to query-variant expansion.
+		if deepSearch {
+			if addedPoly == 0 && addedKalshi == 0 {
+				stagnationPages++
+			} else {
+				stagnationPages = 0
+			}
+			if stagnationPages >= 2 {
+				emit(progressEvent{Type: "step", Msg: "No new markets on additional pages; widening search terms..."})
+				break
+			}
+		}
+	}
+
+	// In deep mode, broaden search with query variants to recover matches
+	// that don't appear on the top ranked page for the literal query.
+	if deepSearch {
+		for _, variant := range expandQueryVariants(query) {
+			emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Trying related search: %q", variant)})
+
+			var wg sync.WaitGroup
+			var polyRaw, kalshiRaw []*venues.RawMarket
+
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				var err error
+				polyRaw, _, err = polyClient.FetchMarketsByQueryPaged(ctx, variant, 0)
+				if err != nil {
+					fmt.Printf("[equinox-ui] WARNING: polymarket variant %q: %v\n", variant, err)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				var err error
+				kalshiRaw, _, err = kalshiClient.FetchMarketsByQueryPaged(ctx, variant, "", 100)
+				if err != nil {
+					fmt.Printf("[equinox-ui] WARNING: kalshi variant %q: %v\n", variant, err)
+				}
+			}()
+			wg.Wait()
+
+			newPoly, _ := norm.Normalize(ctx, polyRaw)
+			newKalshi, _ := norm.Normalize(ctx, kalshiRaw)
+			addedPoly := mergeUniqueMarkets(&allPolyMarkets, seenPoly, newPoly)
+			addedKalshi := mergeUniqueMarkets(&allKalshiMarkets, seenKalshi, newKalshi)
+			if addedPoly == 0 && addedKalshi == 0 {
+				continue
+			}
+
+			pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets)
+			emit(progressEvent{
+				Type:  "result",
+				Msg:   fmt.Sprintf("Expanded pool via %q: +%d poly, +%d kalshi", variant, addedPoly, addedKalshi),
+				Count: len(allPolyMarkets) + len(allKalshiMarkets),
+			})
+		}
+	}
+
+	logRankedCrossMatches(query, allPolyMarkets, allKalshiMarkets)
 
 	if len(pairs) == 0 {
 		emit(progressEvent{Type: "result", Msg: "No equivalent pairs found"})
@@ -280,11 +396,245 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 		emit(progressEvent{Type: "result", Msg: fmt.Sprintf("Found %d equivalent pair(s)", len(pairs)), Count: len(pairs)})
 	}
 
+	polyMarkets := allPolyMarkets
+	kalshiMarkets := allKalshiMarkets
+
+	venueCounts := map[models.VenueID]int{
+		models.VenuePolymarket: len(polyMarkets),
+		models.VenueKalshi:     len(kalshiMarkets),
+	}
+
 	var allMarkets []*models.CanonicalMarket
 	allMarkets = append(allMarkets, polyMarkets...)
 	allMarkets = append(allMarkets, kalshiMarkets...)
 
-	return buildPageData(cfg, ctx, m, allMarkets, pairs, venueCounts, query)
+	data, err := buildPageData(cfg, ctx, m, allMarkets, pairs, venueCounts, query)
+	if err != nil {
+		return nil, err
+	}
+	data.DeepSearch = deepSearch
+	return data, nil
+}
+
+func mergeUniqueMarkets(dst *[]*models.CanonicalMarket, seen map[string]bool, incoming []*models.CanonicalMarket) int {
+	added := 0
+	for _, m := range incoming {
+		if seen[m.VenueMarketID] {
+			continue
+		}
+		seen[m.VenueMarketID] = true
+		*dst = append(*dst, m)
+		added++
+	}
+	return added
+}
+
+// expandQueryVariants builds a small set of high-signal alternatives for deep search.
+func expandQueryVariants(query string) []string {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil
+	}
+
+	stop := map[string]bool{
+		"will": true, "the": true, "a": true, "an": true, "in": true, "on": true,
+		"for": true, "of": true, "to": true, "and": true, "or": true, "is": true,
+	}
+
+	words := strings.Fields(q)
+	var keep []string
+	var years []string
+	for _, w := range words {
+		wl := strings.ToLower(strings.TrimSpace(w))
+		if wl == "" {
+			continue
+		}
+		if len(wl) == 4 && wl[0] >= '0' && wl[0] <= '9' && wl[1] >= '0' && wl[1] <= '9' && wl[2] >= '0' && wl[2] <= '9' && wl[3] >= '0' && wl[3] <= '9' {
+			years = append(years, wl)
+			continue
+		}
+		if stop[wl] {
+			continue
+		}
+		keep = append(keep, w)
+	}
+
+	seen := map[string]bool{strings.ToLower(q): true}
+	var variants []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		k := strings.ToLower(s)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		variants = append(variants, s)
+	}
+
+	if len(keep) >= 2 {
+		add(strings.Join(keep, " "))
+	}
+	if len(years) > 0 && len(keep) > 0 {
+		add(years[0] + " " + strings.Join(keep, " "))
+		add(strings.Join(keep, " ") + " " + years[0])
+	}
+	if len(keep) >= 3 {
+		add(strings.Join(keep[:3], " "))
+	}
+	return variants
+}
+
+// logQueryMatchScores logs, for each market, what fraction of the query words
+// appear in the market title. Helps diagnose why a search returned certain results.
+func logQueryMatchScores(query string, venues ...[]*models.CanonicalMarket) {
+	queryWords := strings.Fields(strings.ToLower(query))
+	if len(queryWords) == 0 {
+		return
+	}
+	fmt.Printf("[query-match] query=%q words=%v\n", query, queryWords)
+	for _, markets := range venues {
+		for _, m := range markets {
+			title := strings.ToLower(m.Title)
+			matched := 0
+			for _, w := range queryWords {
+				if strings.Contains(title, w) {
+					matched++
+				}
+			}
+			pct := float64(matched) / float64(len(queryWords)) * 100
+			fmt.Printf("[query-match] %5.0f%% (%d/%d) [%s] %q\n",
+				pct, matched, len(queryWords), m.VenueID, m.Title)
+		}
+	}
+}
+
+// logCrossVenueWordOverlap logs, for every Poly×Kalshi pair, the fraction of
+// Poly title words that appear in the Kalshi title. Helps spot matches that
+// share words but are phrased very differently.
+func logCrossVenueWordOverlap(polyMarkets, kalshiMarkets []*models.CanonicalMarket) {
+	fmt.Printf("[cross-overlap] comparing %d poly × %d kalshi markets\n", len(polyMarkets), len(kalshiMarkets))
+	for _, p := range polyMarkets {
+		polyWords := strings.Fields(strings.ToLower(p.Title))
+		if len(polyWords) == 0 {
+			continue
+		}
+		for _, k := range kalshiMarkets {
+			kalshiTitle := strings.ToLower(k.Title)
+			matched := 0
+			for _, w := range polyWords {
+				if strings.Contains(kalshiTitle, w) {
+					matched++
+				}
+			}
+			pct := float64(matched) / float64(len(polyWords)) * 100
+			if pct >= 50 { // only log pairs with at least 50% overlap
+				fmt.Printf("[cross-overlap] %5.0f%% (%d/%d) poly=%q | kalshi=%q\n",
+					pct, matched, len(polyWords), p.Title, k.Title)
+			}
+		}
+	}
+}
+
+// logRankedCrossMatches takes the top-10 poly markets by query-match score,
+// then for each finds its single best kalshi match by Jaccard title similarity.
+// Results are ranked by that similarity score.
+func logRankedCrossMatches(query string, polyMarkets, kalshiMarkets []*models.CanonicalMarket) {
+	queryWords := strings.Fields(strings.ToLower(query))
+	if len(queryWords) == 0 || len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
+		return
+	}
+
+	queryScore := func(m *models.CanonicalMarket) float64 {
+		title := strings.ToLower(m.Title)
+		matched := 0
+		for _, w := range queryWords {
+			if strings.Contains(title, w) {
+				matched++
+			}
+		}
+		return float64(matched) / float64(len(queryWords))
+	}
+
+	jaccard := func(a, b string) float64 {
+		wa := strings.Fields(strings.ToLower(a))
+		wb := strings.Fields(strings.ToLower(b))
+		setA := make(map[string]bool, len(wa))
+		for _, w := range wa {
+			setA[w] = true
+		}
+		inter, union := 0, len(setA)
+		for _, w := range wb {
+			if setA[w] {
+				inter++
+			} else {
+				union++
+			}
+		}
+		if union == 0 {
+			return 0
+		}
+		return float64(inter) / float64(union)
+	}
+
+	// Rank poly markets by query score, take top 10
+	type polyScored struct {
+		m     *models.CanonicalMarket
+		qscore float64
+	}
+	polyItems := make([]polyScored, len(polyMarkets))
+	for i, m := range polyMarkets {
+		polyItems[i] = polyScored{m, queryScore(m)}
+	}
+	for i := 1; i < len(polyItems); i++ {
+		for j := i; j > 0 && polyItems[j].qscore > polyItems[j-1].qscore; j-- {
+			polyItems[j], polyItems[j-1] = polyItems[j-1], polyItems[j]
+		}
+	}
+	if len(polyItems) > 10 {
+		polyItems = polyItems[:10]
+	}
+
+	// For each top-10 poly, find the single best kalshi match by Jaccard
+	type pair struct {
+		poly      *models.CanonicalMarket
+		kalshi    *models.CanonicalMarket
+		polyQ     float64
+		kalshiQ   float64
+		similarity float64
+	}
+	var pairs []pair
+	for _, p := range polyItems {
+		var bestK *models.CanonicalMarket
+		bestSim := -1.0
+		bestKQ := 0.0
+		for _, k := range kalshiMarkets {
+			sim := jaccard(p.m.Title, k.Title)
+			if sim > bestSim {
+				bestSim = sim
+				bestK = k
+				bestKQ = queryScore(k)
+			}
+		}
+		if bestK != nil {
+			pairs = append(pairs, pair{p.m, bestK, p.qscore, bestKQ, bestSim})
+		}
+	}
+
+	// Rank pairs by similarity descending
+	for i := 1; i < len(pairs); i++ {
+		for j := i; j > 0 && pairs[j].similarity > pairs[j-1].similarity; j-- {
+			pairs[j], pairs[j-1] = pairs[j-1], pairs[j]
+		}
+	}
+
+	fmt.Printf("[ranked-cross] top-10 poly by query-match, each paired with best kalshi by title similarity\n")
+	for i, pr := range pairs {
+		fmt.Printf("[ranked-cross] #%02d sim=%.2f (poly=%.0f%% kalshi=%.0f%%)\n  poly:  %q\n  kalshi:%q\n",
+			i+1, pr.similarity, pr.polyQ*100, pr.kalshiQ*100, pr.poly.Title, pr.kalshi.Title)
+	}
 }
 
 // buildPageData takes pre-computed match pairs and builds the PageData for the template.
@@ -410,6 +760,7 @@ func toMarketView(m *models.CanonicalMarket) MarketView {
 	return MarketView{
 		Venue:              string(m.VenueID),
 		VenueMarketID:      m.VenueMarketID,
+		VenueYesTokenID:    m.VenueYesTokenID,
 		Title:              m.Title,
 		Category:           m.Category,
 		Status:             string(m.Status),
@@ -741,6 +1092,18 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 .modal-link { display: inline-flex; align-items: center; gap: 4px; padding: 6px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--accent-bright); font-size: 0.75rem; font-weight: 500; text-decoration: none; transition: all 150ms; }
 .modal-link:hover { border-color: var(--accent); background: var(--accent-glow); }
 .modal-link .material-icons-round { font-size: 14px; }
+.live-panel { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-primary); padding: 10px; }
+.live-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.live-now { font-size: 1.05rem; font-weight: 800; letter-spacing: -0.4px; color: var(--text-primary); }
+.live-delta { font-size: 0.78rem; font-weight: 700; }
+.live-delta.up { color: var(--green); }
+.live-delta.down { color: var(--red); }
+.live-delta.flat { color: var(--text-muted); }
+.live-chart { width: 100%; height: 120px; display: block; border-radius: 6px; background: linear-gradient(180deg, rgba(129,140,248,0.06), rgba(0,0,0,0)); }
+.live-line { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.live-line.up { stroke: var(--green); }
+.live-line.down { stroke: var(--red); }
+.live-line.flat { stroke: var(--accent); }
 
 @media (max-width: 768px) {
   .pair-body { grid-template-columns: 1fr; }
@@ -776,6 +1139,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 .loader-venue-kalshi { color: #fbbf24; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; margin-left: auto; }
 @keyframes loaderIn { from { opacity:0; transform:translateX(-10px); } to { opacity:1; transform:translateX(0); } }
 @keyframes loaderSpin { to { transform: rotate(360deg); } }
+
 </style>
 </head>
 <body>
@@ -871,6 +1235,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
          data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-title="{{$p.MarketA.Title}}"
          data-description="{{$p.MarketA.Description}}" data-category="{{$p.MarketA.Category}}" data-tags="{{$p.MarketA.Tags}}"
          data-status="{{$p.MarketA.Status}}" data-yes="{{printf "%.6f" $p.MarketA.YesPrice}}"
+         data-token-id="{{$p.MarketA.VenueYesTokenID}}"
          data-liquidity="{{printf "%.2f" $p.MarketA.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketA.Spread}}"
          data-resolution-date="{{$p.MarketA.ResolutionDate}}" data-created-at="{{$p.MarketA.CreatedAt}}" data-updated-at="{{$p.MarketA.UpdatedAt}}"
          data-volume24h="{{printf "%.2f" $p.MarketA.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketA.OpenInterest}}"
@@ -884,7 +1249,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         <div class="mkt-title">{{$p.MarketA.Title}}</div>
       </div>
       <div class="mkt-stats">
-        <span class="mkt-price">{{pct $p.MarketA.YesPrice}}</span>
+        <span class="mkt-price" data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-token-id="{{$p.MarketA.VenueYesTokenID}}">{{pct $p.MarketA.YesPrice}}</span>
         <span class="mkt-stat">Liq <span>{{usd $p.MarketA.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketA.Spread}}{{pct $p.MarketA.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketA.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketA.ResolutionDate}}</span></span>{{end}}
@@ -895,6 +1260,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
          data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-title="{{$p.MarketB.Title}}"
          data-description="{{$p.MarketB.Description}}" data-category="{{$p.MarketB.Category}}" data-tags="{{$p.MarketB.Tags}}"
          data-status="{{$p.MarketB.Status}}" data-yes="{{printf "%.6f" $p.MarketB.YesPrice}}"
+         data-token-id="{{$p.MarketB.VenueYesTokenID}}"
          data-liquidity="{{printf "%.2f" $p.MarketB.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketB.Spread}}"
          data-resolution-date="{{$p.MarketB.ResolutionDate}}" data-created-at="{{$p.MarketB.CreatedAt}}" data-updated-at="{{$p.MarketB.UpdatedAt}}"
          data-volume24h="{{printf "%.2f" $p.MarketB.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketB.OpenInterest}}"
@@ -908,7 +1274,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         <div class="mkt-title">{{$p.MarketB.Title}}</div>
       </div>
       <div class="mkt-stats">
-        <span class="mkt-price">{{pct $p.MarketB.YesPrice}}</span>
+        <span class="mkt-price" data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-token-id="{{$p.MarketB.VenueYesTokenID}}">{{pct $p.MarketB.YesPrice}}</span>
         <span class="mkt-stat">Liq <span>{{usd $p.MarketB.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketB.Spread}}{{pct $p.MarketB.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketB.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketB.ResolutionDate}}</span></span>{{end}}
@@ -965,6 +1331,18 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         </div>
       </div>
       <div class="modal-section">
+        <div class="modal-section-title">Live Price</div>
+        <div class="live-panel">
+          <div class="live-head">
+            <div class="live-now" id="mdLiveNow">--</div>
+            <div class="live-delta flat" id="mdLiveDelta">--</div>
+          </div>
+          <svg id="mdLiveChart" class="live-chart" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="Live price chart">
+            <polyline id="mdLiveLine" class="live-line flat" points=""></polyline>
+          </svg>
+        </div>
+      </div>
+      <div class="modal-section">
         <div class="modal-section-title">Timestamps</div>
         <div class="modal-grid">
           <div class="modal-field"><div class="modal-field-label">Created</div><div class="modal-field-value" id="mdCreatedAt"></div></div>
@@ -983,6 +1361,36 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 
 <script>
 (function() {
+  if (window.__livePriceState) return;
+  var historyByKey = {};
+  var latestByKey = {};
+  var maxPoints = 120;
+
+  function mkKey(venue, marketId) {
+    return String((venue || "").toLowerCase()) + ":" + String(marketId || "");
+  }
+
+  function publish(venue, marketId, yesProb) {
+    if (typeof yesProb !== "number" || !isFinite(yesProb) || !marketId) return;
+    if (yesProb < 0) yesProb = 0;
+    if (yesProb > 1) yesProb = 1;
+    var key = mkKey(venue, marketId);
+    if (!historyByKey[key]) historyByKey[key] = [];
+    historyByKey[key].push({ t: Date.now(), p: yesProb });
+    if (historyByKey[key].length > maxPoints) historyByKey[key].shift();
+    latestByKey[key] = yesProb;
+    window.dispatchEvent(new CustomEvent("equinox-price-tick", { detail: { key: key, p: yesProb } }));
+  }
+
+  window.__livePriceState = {
+    key: mkKey,
+    publish: publish,
+    latest: function(venue, marketId) { return latestByKey[mkKey(venue, marketId)]; },
+    history: function(venue, marketId) { return (historyByKey[mkKey(venue, marketId)] || []).slice(); }
+  };
+})();
+
+(function() {
   window.toggleExplain = function(btn, id) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -997,11 +1405,50 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
   ["mdTitle","mdVenue","mdMarketId","mdStatus","mdDescription","mdTags",
    "mdCategory","mdResolutionDate","mdResolutionCriteria","mdYes",
    "mdLiquidity","mdSpread","mdCreatedAt","mdUpdatedAt","mdVolume",
-   "mdOpenInterest","mdRawPayload","mdLinks","mdImage","mdImageBanner"].forEach(function(id) {
+   "mdOpenInterest","mdRawPayload","mdLinks","mdImage","mdImageBanner",
+   "mdLiveNow","mdLiveDelta","mdLiveLine"].forEach(function(id) {
     fields[id] = document.getElementById(id);
   });
 
   function safe(v) { return v ? String(v) : "--"; }
+  var activeLive = { venue: "", marketId: "" };
+
+  function renderLiveChart(venue, marketId) {
+    var st = window.__livePriceState;
+    if (!st) return;
+    var hist = st.history(venue, marketId);
+    if (!hist.length) {
+      fields.mdLiveNow.textContent = "--";
+      fields.mdLiveDelta.textContent = "--";
+      fields.mdLiveDelta.className = "live-delta flat";
+      fields.mdLiveLine.setAttribute("points", "");
+      fields.mdLiveLine.setAttribute("class", "live-line flat");
+      return;
+    }
+
+    var first = hist[0].p;
+    var last = hist[hist.length - 1].p;
+    fields.mdLiveNow.textContent = (last * 100).toFixed(2) + "%";
+    var diff = last - first;
+    var cls = "flat";
+    if (diff > 0.0001) cls = "up";
+    else if (diff < -0.0001) cls = "down";
+    var sign = diff > 0 ? "+" : "";
+    fields.mdLiveDelta.textContent = sign + (diff * 100).toFixed(2) + "%";
+    fields.mdLiveDelta.className = "live-delta " + cls;
+
+    var min = hist[0].p, max = hist[0].p;
+    hist.forEach(function(pt) { if (pt.p < min) min = pt.p; if (pt.p > max) max = pt.p; });
+    if (max-min < 0.0001) { max += 0.0001; min -= 0.0001; }
+    var w = 600, h = 120;
+    var pts = hist.map(function(pt, i) {
+      var x = (hist.length <= 1) ? 0 : (i * (w / (hist.length - 1)));
+      var y = h - ((pt.p - min) / (max - min)) * (h - 8) - 4;
+      return x.toFixed(1) + "," + y.toFixed(1);
+    }).join(" ");
+    fields.mdLiveLine.setAttribute("points", pts);
+    fields.mdLiveLine.setAttribute("class", "live-line " + cls);
+  }
 
   function showMarketModal(card) {
     var d = card.dataset;
@@ -1021,6 +1468,14 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     fields.mdYes.textContent = safe(d.yes);
     fields.mdLiquidity.textContent = safe(d.liquidity);
     fields.mdSpread.textContent = safe(d.spread);
+
+    activeLive.venue = String(d.venue || "").toLowerCase();
+    activeLive.marketId = String(d.marketId || "");
+    var initYes = parseFloat(d.yes);
+    if (window.__livePriceState && isFinite(initYes)) {
+      window.__livePriceState.publish(activeLive.venue, activeLive.marketId, initYes);
+    }
+    renderLiveChart(activeLive.venue, activeLive.marketId);
 
     var imgUrl = d.imageUrl || "";
     if (imgUrl) {
@@ -1060,6 +1515,8 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     modal.classList.remove("is-open");
     modal.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
+    activeLive.venue = "";
+    activeLive.marketId = "";
   };
 
   window.addEventListener("keydown", function(e) {
@@ -1080,6 +1537,152 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     });
   }, { threshold: 0.05 });
   document.querySelectorAll(".pair-card").forEach(function(card) { observer.observe(card); });
+
+  window.addEventListener("equinox-price-tick", function() {
+    if (!activeLive.venue || !activeLive.marketId) return;
+    if (!modal.classList.contains("is-open")) return;
+    renderLiveChart(activeLive.venue, activeLive.marketId);
+  });
+})();
+
+/* ── Live Polymarket prices (WSS) ───────────────────────── */
+(function() {
+  var priceEls = Array.prototype.slice.call(document.querySelectorAll(".mkt-price[data-token-id]"));
+  if (!priceEls.length) return;
+
+  var byToken = {};
+  priceEls.forEach(function(el) {
+    var venue = (el.dataset.venue || "").toLowerCase();
+    var token = (el.dataset.tokenId || "").trim();
+    if (venue !== "polymarket" || !token) return;
+    if (!byToken[token]) byToken[token] = [];
+    byToken[token].push(el);
+  });
+
+  var tokenIDs = Object.keys(byToken);
+  if (!tokenIDs.length) return;
+
+  function renderProbability(token, p) {
+    if (typeof p !== "number" || !isFinite(p)) return;
+    if (p < 0) p = 0;
+    if (p > 1) p = 1;
+    var txt = (p * 100).toFixed(1) + "%";
+    (byToken[token] || []).forEach(function(el) {
+      el.textContent = txt;
+      if (window.__livePriceState) {
+        window.__livePriceState.publish("polymarket", el.dataset.marketId, p);
+      }
+    });
+  }
+
+  function extractProb(msg) {
+    function toNum(v) {
+      if (typeof v === "number" && isFinite(v)) return v;
+      if (typeof v === "string" && v.trim() !== "") {
+        var n = parseFloat(v);
+        if (isFinite(n)) return n;
+      }
+      return null;
+    }
+    var p = null;
+    var price = toNum(msg.price);
+    var lastTrade = toNum(msg.last_trade_price);
+    var bestBid = toNum(msg.best_bid);
+    var bestAsk = toNum(msg.best_ask);
+    if (price != null) p = price;
+    else if (lastTrade != null) p = lastTrade;
+    else if (bestBid != null && bestAsk != null) p = (bestBid + bestAsk) / 2;
+    else if (bestBid != null) p = bestBid;
+    else if (bestAsk != null) p = bestAsk;
+    if (p == null) return null;
+    // Some feeds send cents-style prices. Normalize if needed.
+    if (p > 1.000001) p = p / 100.0;
+    return p;
+  }
+
+  var ws = new WebSocket("wss://ws-subscriptions-clob.polymarket.com/ws/market");
+  ws.onopen = function() {
+    // Docs have used both asset_ids and assets_ids in examples.
+    var payload = { type: "market", asset_ids: tokenIDs, assets_ids: tokenIDs };
+    ws.send(JSON.stringify(payload));
+  };
+  ws.onmessage = function(evt) {
+    var data;
+    try { data = JSON.parse(evt.data); } catch (_) { return; }
+    var msgs = Array.isArray(data) ? data : [data];
+    msgs.forEach(function(msg) {
+      if (!msg || typeof msg !== "object") return;
+      var token = String(msg.asset_id || msg.assetId || "").trim();
+      if (!token || !byToken[token]) return;
+      var prob = extractProb(msg);
+      if (prob == null) return;
+      renderProbability(token, prob);
+    });
+  };
+  ws.onerror = function() {};
+})();
+
+/* ── Live Kalshi prices (WSS ticker) ─────────────────────── */
+(function() {
+  var priceEls = Array.prototype.slice.call(document.querySelectorAll(".mkt-price[data-market-id]"));
+  if (!priceEls.length) return;
+
+  var byTicker = {};
+  priceEls.forEach(function(el) {
+    var venue = (el.dataset.venue || "").toLowerCase();
+    var ticker = (el.dataset.marketId || "").trim();
+    if (venue !== "kalshi" || !ticker) return;
+    if (!byTicker[ticker]) byTicker[ticker] = [];
+    byTicker[ticker].push(el);
+  });
+
+  var tickers = Object.keys(byTicker);
+  if (!tickers.length) return;
+
+  function renderTicker(ticker, yesProb) {
+    if (typeof yesProb !== "number" || !isFinite(yesProb)) return;
+    if (yesProb < 0) yesProb = 0;
+    if (yesProb > 1) yesProb = 1;
+    var txt = (yesProb * 100).toFixed(1) + "%";
+    (byTicker[ticker] || []).forEach(function(el) {
+      el.textContent = txt;
+      if (window.__livePriceState) {
+        window.__livePriceState.publish("kalshi", ticker, yesProb);
+      }
+    });
+  }
+
+  var ws = new WebSocket("wss://api.elections.kalshi.com/trade-api/ws/v2");
+  ws.onopen = function() {
+    ws.send(JSON.stringify({
+      id: 1,
+      cmd: "subscribe",
+      params: {
+        channels: ["ticker"],
+        market_tickers: tickers
+      }
+    }));
+  };
+  ws.onmessage = function(evt) {
+    var data;
+    try { data = JSON.parse(evt.data); } catch (_) { return; }
+    if (!data || data.type !== "ticker" || !data.msg) return;
+
+    var ticker = String(data.msg.market_ticker || "").trim();
+    if (!ticker || !byTicker[ticker]) return;
+
+    var yesBid = data.msg.yes_bid;
+    var yesAsk = data.msg.yes_ask;
+    if (typeof yesBid === "string" && yesBid.trim() !== "") yesBid = parseFloat(yesBid);
+    if (typeof yesAsk === "string" && yesAsk.trim() !== "") yesAsk = parseFloat(yesAsk);
+    var yes = null;
+    if (typeof yesBid === "number" && typeof yesAsk === "number") yes = (yesBid + yesAsk) / 2 / 100.0;
+    else if (typeof yesBid === "number") yes = yesBid / 100.0;
+    else if (typeof yesAsk === "number") yes = yesAsk / 100.0;
+    if (yes == null) return;
+    renderTicker(ticker, yes);
+  };
+  ws.onerror = function() {};
 })();
 
 /* ── SSE search loader ───────────────────────────────────── */
@@ -1122,11 +1725,12 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     return '<span class="loader-count">' + n + '</span>';
   }
 
-  function startStreamSearch(q) {
+  function startStreamSearch(q, deepSearch) {
     showLoader(q);
-    history.pushState(null, "", "/?q=" + encodeURIComponent(q));
+    var target = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
+    history.pushState(null, "", target);
 
-    var es = new EventSource("/stream?q=" + encodeURIComponent(q));
+    var es = new EventSource("/stream?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : ""));
     es.onmessage = function(e) {
       try {
         var evt = JSON.parse(e.data);
@@ -1138,7 +1742,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
           addLine("loader-result", "ok", "✓", evt.msg, extra);
         } else if (evt.type === "done") {
           es.close();
-          window.location.href = "/?q=" + encodeURIComponent(q);
+          window.location.href = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
         } else if (evt.type === "error") {
           es.close();
           addLine("loader-result", "warn", "!", evt.msg, "");
@@ -1147,7 +1751,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     };
     es.onerror = function() {
       es.close();
-      window.location.href = "/?q=" + encodeURIComponent(q);
+      window.location.href = "/?q=" + encodeURIComponent(q) + (deepSearch ? "&more=1" : "");
     };
   }
 
@@ -1158,7 +1762,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
       var q = input.value.trim();
       if (!q) return;
       e.preventDefault();
-      startStreamSearch(q);
+      startStreamSearch(q, false);
     });
   });
 
@@ -1168,9 +1772,10 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
       e.preventDefault();
       var url = new URL(a.href);
       var q = url.searchParams.get("q") || "";
-      if (q) startStreamSearch(q);
+      if (q) startStreamSearch(q, false);
     });
   });
+
 })();
 </script>
 </body>

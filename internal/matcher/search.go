@@ -156,13 +156,19 @@ func deduplicateSearchResults(searchResults []SearchResult) []SearchResult {
 }
 
 // FindEquivalentPairsFromSearch uses the LLM to match search candidates across venues.
-// It collects all unique cross-venue markets from search results, then sends them
-// to the LLM for pairwise comparison.
-func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResults []SearchResult) []*MatchResult {
-	// Collect unique markets per venue from search results
+//
+// Pre-filter pipeline (batched, with fallback expansion):
+//  1. Rank all markets per venue by query-word match score.
+//  2. Try the top batchSize per venue. If no matches found, slide to the next
+//     batch of batchSize and retry — continuing until matches are found or
+//     all markets are exhausted.
+//  3. Within each batch, selectCandidates re-ranks kalshi by Jaccard per poly.
+const batchSize = 10
+
+func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResults []SearchResult, query string) []*MatchResult {
+	// Collect unique markets per venue
 	polyMap := map[string]*models.CanonicalMarket{}
 	kalshiMap := map[string]*models.CanonicalMarket{}
-
 	for _, sr := range searchResults {
 		addToVenueMap(sr.Source, polyMap, kalshiMap)
 		for _, c := range sr.Candidates {
@@ -170,29 +176,79 @@ func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResul
 		}
 	}
 
-	var polyMarkets, kalshiMarkets []*models.CanonicalMarket
-	for _, m := range polyMap {
-		polyMarkets = append(polyMarkets, m)
+	var allPoly, allKalshi []*models.CanonicalMarket
+	for _, mm := range polyMap {
+		allPoly = append(allPoly, mm)
 	}
-	for _, m := range kalshiMap {
-		kalshiMarkets = append(kalshiMarkets, m)
+	for _, mm := range kalshiMap {
+		allKalshi = append(allKalshi, mm)
 	}
 
-	fmt.Printf("[matcher/search] Unique markets: poly=%d kalshi=%d\n", len(polyMarkets), len(kalshiMarkets))
+	// Rank all markets by query-word match score (descending)
+	rankedPoly := topByQueryMatch(query, allPoly, len(allPoly))
+	rankedKalshi := topByQueryMatch(query, allKalshi, len(allKalshi))
 
-	if len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
+	fmt.Printf("[matcher/search] Ranked pools: poly=%d kalshi=%d\n", len(rankedPoly), len(rankedKalshi))
+
+	if len(rankedPoly) == 0 || len(rankedKalshi) == 0 {
 		fmt.Printf("[matcher/search] No cross-venue pairs to compare\n")
 		return nil
 	}
 
-	// Use LLM matcher — each Poly market compared against all Kalshi in one call
 	llm := NewLLMMatcher()
 	if llm == nil {
 		fmt.Printf("[matcher/search] WARNING: OPENAI_API_KEY not set, falling back to fuzzy matching\n")
 		return m.fuzzyFallback(ctx, searchResults)
 	}
 
-	llmResults := llm.MatchAll(ctx, polyMarkets, kalshiMarkets)
+	// Try batches until we find matches or exhaust the list
+	maxOffset := len(rankedPoly)
+	if len(rankedKalshi) > maxOffset {
+		maxOffset = len(rankedKalshi)
+	}
+
+	// Try batches of batchSize from the ranked lists. Within each batch,
+	// pre-rank all pairs by Jaccard and send only the top 10 to the LLM.
+	var llmResults []*LLMMatchResult
+	for offset := 0; offset < maxOffset; offset += batchSize {
+		var polyBatch, kalshiBatch []*models.CanonicalMarket
+		if offset < len(rankedPoly) {
+			end := offset + batchSize
+			if end > len(rankedPoly) {
+				end = len(rankedPoly)
+			}
+			polyBatch = rankedPoly[offset:end]
+		}
+		if offset < len(rankedKalshi) {
+			end := offset + batchSize
+			if end > len(rankedKalshi) {
+				end = len(rankedKalshi)
+			}
+			kalshiBatch = rankedKalshi[offset:end]
+		}
+
+		if len(polyBatch) == 0 && len(kalshiBatch) == 0 {
+			break
+		}
+
+		top10 := topPairsByJaccard(polyBatch, kalshiBatch, 10)
+		fmt.Printf("[matcher/search] offset=%d: top-%d pairs by Jaccard → LLM\n", offset, len(top10))
+
+		batchResults := llm.MatchPairs(ctx, top10)
+		if len(batchResults) > 0 {
+			llmResults = batchResults
+			fmt.Printf("[matcher/search] Found %d results at offset=%d\n", len(batchResults), offset)
+			break
+		}
+	}
+
+	// Final fallback: query match exhausted — pick top 10 pairs from all markets
+	// by Jaccard similarity and send only those to the LLM.
+	if len(llmResults) == 0 {
+		top10 := topPairsByJaccard(allPoly, allKalshi, 10)
+		fmt.Printf("[matcher/search] Full cross-pollination fallback: top-%d pairs → LLM\n", len(top10))
+		llmResults = llm.MatchPairs(ctx, top10)
+	}
 
 	// Convert LLM results to MatchResults, cross-validating with rule-based scores
 	var confirmed []*MatchResult
@@ -222,6 +278,21 @@ func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResul
 			effectiveConf = llmConf * (realFuzzy / 0.45)
 			fmt.Printf("[matcher/search] Downgraded: LLM=%.2f → %.2f (fuzzy=%.2f) | %q vs %q\n",
 				llmConf, effectiveConf, realFuzzy, lr.MarketA.Title, lr.MarketB.Title)
+		}
+
+		// Additional guardrails:
+		//  1) require the rule-based composite to clear probable threshold
+		//  2) require either decent fuzzy overlap or strong event signal
+		// This prevents same-topic-but-different-question false positives.
+		if ruleResult.CompositeScore < m.cfg.ProbableMatchThreshold {
+			fmt.Printf("[matcher/search] Rejected by composite gate: llm=%.2f rule=%.2f (<%.2f) | %q vs %q\n",
+				llmConf, ruleResult.CompositeScore, m.cfg.ProbableMatchThreshold, lr.MarketA.Title, lr.MarketB.Title)
+			continue
+		}
+		if !ruleResult.SignatureMatch && realFuzzy < 0.50 && ruleResult.EventMatchScore < 0.60 {
+			fmt.Printf("[matcher/search] Rejected by semantic gate: fuzzy=%.2f event=%.2f | %q vs %q\n",
+				realFuzzy, ruleResult.EventMatchScore, lr.MarketA.Title, lr.MarketB.Title)
+			continue
 		}
 
 		confidence := ConfidenceNoMatch
@@ -270,34 +341,250 @@ func addToVenueMap(m *models.CanonicalMarket, polyMap, kalshiMap map[string]*mod
 
 // fuzzyFallback uses the old rule-based matching when no LLM is available.
 func (m *Matcher) fuzzyFallback(ctx context.Context, searchResults []SearchResult) []*MatchResult {
-	deduped := deduplicateSearchResults(searchResults)
-
-	totalPairs := 0
-	for _, sr := range deduped {
-		totalPairs += len(sr.Candidates)
+	// Collect all unique markets per venue
+	polyMap := map[string]*models.CanonicalMarket{}
+	kalshiMap := map[string]*models.CanonicalMarket{}
+	for _, sr := range searchResults {
+		addToVenueMap(sr.Source, polyMap, kalshiMap)
+		for _, c := range sr.Candidates {
+			addToVenueMap(c, polyMap, kalshiMap)
+		}
 	}
-	fmt.Printf("[matcher/search] Fuzzy fallback: scoring %d pairs...\n", totalPairs)
+	var polyMarkets, kalshiMarkets []*models.CanonicalMarket
+	for _, mm := range polyMap {
+		polyMarkets = append(polyMarkets, mm)
+	}
+	for _, mm := range kalshiMap {
+		kalshiMarkets = append(kalshiMarkets, mm)
+	}
+
+	fmt.Printf("[matcher/search] Fuzzy fallback: %d poly × %d kalshi\n", len(polyMarkets), len(kalshiMarkets))
+
+	// For each poly market, find its best kalshi match by Jaccard title similarity.
+	// This mirrors the query-based pre-filter but without a query.
+	jaccard := func(a, b string) float64 {
+		wa := strings.Fields(strings.ToLower(a))
+		wb := strings.Fields(strings.ToLower(b))
+		setA := make(map[string]bool, len(wa))
+		for _, w := range wa {
+			setA[w] = true
+		}
+		inter, union := 0, len(setA)
+		for _, w := range wb {
+			if setA[w] {
+				inter++
+			} else {
+				union++
+			}
+		}
+		if union == 0 {
+			return 0
+		}
+		return float64(inter) / float64(union)
+	}
 
 	var confirmed []*MatchResult
-	for _, sr := range deduped {
-		for _, candidate := range sr.Candidates {
-			result := m.compare(sr.Source, candidate)
-			if result.Confidence == ConfidenceMatch ||
-				(result.Confidence == ConfidenceProbable && result.CompositeScore >= m.cfg.MatchThreshold) {
-				confirmed = append(confirmed, result)
+	for _, poly := range polyMarkets {
+		// Pick best kalshi candidate by Jaccard, then run full rule-based compare
+		var bestK *models.CanonicalMarket
+		bestSim := -1.0
+		for _, k := range kalshiMarkets {
+			if sim := jaccard(poly.Title, k.Title); sim > bestSim {
+				bestSim = sim
+				bestK = k
 			}
+		}
+		if bestK == nil {
+			continue
+		}
+		result := m.compare(poly, bestK)
+		if result.Confidence == ConfidenceMatch ||
+			(result.Confidence == ConfidenceProbable && result.CompositeScore >= m.cfg.MatchThreshold) {
+			confirmed = append(confirmed, result)
 		}
 	}
 
 	confirmed = DeduplicatePairs(confirmed)
 
+	// Sort by composite score descending so best pairs win dedup.
 	for i := 1; i < len(confirmed); i++ {
 		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
 			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
 		}
 	}
 
+	// Each market may appear in at most one pair — keep the highest-scoring match.
+	confirmed = deduplicateByMarket(confirmed)
+
 	return confirmed
+}
+
+// CrossPollinateJaccard finds cross-venue pairs from broad pools for UI queries.
+// Despite the legacy name, selection uses full rule-based compare() (semantic
+// signature, hard gates, fuzzy score, date checks), not raw token overlap.
+func (m *Matcher) CrossPollinateJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket) []*MatchResult {
+	if len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
+		return nil
+	}
+
+	// Score all cross-venue candidates, then deduplicate globally by market.
+	// This avoids missing good pairs when a market's local "best" candidate
+	// conflicts with a stronger global pairing.
+	var candidates []*MatchResult
+	for _, poly := range polyMarkets {
+		for _, k := range kalshiMarkets {
+			r := m.compare(poly, k)
+			if r.Confidence == ConfidenceNoMatch {
+				continue
+			}
+			// Keep PROBABLE only when it clears the strict match threshold.
+			if r.Confidence == ConfidenceProbable && r.CompositeScore < m.cfg.MatchThreshold {
+				continue
+			}
+			candidates = append(candidates, r)
+		}
+	}
+
+	// Sort by score so dedup keeps strongest pairs first.
+	for i := 1; i < len(candidates); i++ {
+		for j := i; j > 0 && candidates[j].CompositeScore > candidates[j-1].CompositeScore; j-- {
+			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
+		}
+	}
+
+	results := deduplicateByMarket(candidates)
+
+	fmt.Printf("[matcher] CrossPollinateJaccard: %d poly × %d kalshi → %d pairs\n",
+		len(polyMarkets), len(kalshiMarkets), len(results))
+	return results
+}
+
+// deduplicateByMarket ensures each individual market ID appears in at most one
+// MatchResult. When a market appears in multiple pairs, only the highest-scoring
+// pair (first after sorting) is kept.
+func deduplicateByMarket(pairs []*MatchResult) []*MatchResult {
+	usedA := map[string]bool{}
+	usedB := map[string]bool{}
+	var out []*MatchResult
+	for _, p := range pairs {
+		idA := p.MarketA.VenueMarketID
+		idB := p.MarketB.VenueMarketID
+		if usedA[idA] || usedB[idB] || usedA[idB] || usedB[idA] {
+			continue
+		}
+		usedA[idA] = true
+		usedB[idB] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// topPairsByJaccard scores every poly×kalshi combination by Jaccard title
+// similarity and returns the top-k unique pairs (each market used at most once).
+func topPairsByJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket, k int) [][2]*models.CanonicalMarket {
+	type pair struct {
+		poly   *models.CanonicalMarket
+		kalshi *models.CanonicalMarket
+		sim    float64
+	}
+
+	jaccard := func(a, b string) float64 {
+		wa := strings.Fields(strings.ToLower(a))
+		wb := strings.Fields(strings.ToLower(b))
+		set := make(map[string]bool, len(wa))
+		for _, w := range wa {
+			set[w] = true
+		}
+		inter, union := 0, len(set)
+		for _, w := range wb {
+			if set[w] {
+				inter++
+			} else {
+				union++
+			}
+		}
+		if union == 0 {
+			return 0
+		}
+		return float64(inter) / float64(union)
+	}
+
+	var all []pair
+	for _, p := range polyMarkets {
+		for _, k := range kalshiMarkets {
+			all = append(all, pair{p, k, jaccard(p.Title, k.Title)})
+		}
+	}
+
+	// Sort descending by similarity
+	for i := 1; i < len(all); i++ {
+		for j := i; j > 0 && all[j].sim > all[j-1].sim; j-- {
+			all[j], all[j-1] = all[j-1], all[j]
+		}
+	}
+
+	// Take top-k, each market used once
+	usedPoly := map[string]bool{}
+	usedKalshi := map[string]bool{}
+	var result [][2]*models.CanonicalMarket
+	for _, pr := range all {
+		if len(result) >= k {
+			break
+		}
+		if usedPoly[pr.poly.VenueMarketID] || usedKalshi[pr.kalshi.VenueMarketID] {
+			continue
+		}
+		usedPoly[pr.poly.VenueMarketID] = true
+		usedKalshi[pr.kalshi.VenueMarketID] = true
+		result = append(result, [2]*models.CanonicalMarket{pr.poly, pr.kalshi})
+	}
+	return result
+}
+
+// topByQueryMatch scores markets by how many query words appear in their title
+// and returns the top-k. Markets with zero query-word overlap are excluded.
+func topByQueryMatch(query string, markets []*models.CanonicalMarket, k int) []*models.CanonicalMarket {
+	words := strings.Fields(strings.ToLower(query))
+	if len(words) == 0 || len(markets) == 0 {
+		if k > len(markets) {
+			return markets
+		}
+		return markets[:k]
+	}
+
+	type scored struct {
+		m     *models.CanonicalMarket
+		score float64
+	}
+	items := make([]scored, 0, len(markets))
+	for _, mm := range markets {
+		title := strings.ToLower(mm.Title)
+		matched := 0
+		for _, w := range words {
+			if strings.Contains(title, w) {
+				matched++
+			}
+		}
+		if matched > 0 {
+			items = append(items, scored{mm, float64(matched) / float64(len(words))})
+		}
+	}
+
+	// Sort descending by score
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j].score > items[j-1].score; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
+
+	if k > len(items) {
+		k = len(items)
+	}
+	out := make([]*models.CanonicalMarket, k)
+	for i := range out {
+		out[i] = items[i].m
+	}
+	return out
 }
 
 func countRawPairs(searchResults []SearchResult) int {

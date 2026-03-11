@@ -40,6 +40,7 @@ package router
 import (
 	"fmt"
 	"math"
+	"os"
 	"strings"
 
 	"github.com/equinox/config"
@@ -86,12 +87,23 @@ type RoutingDecision struct {
 
 // Router makes venue routing decisions for hypothetical orders.
 type Router struct {
-	cfg *config.Config
+	cfg      *config.Config
+	useLLM   bool
+	llmJudge *LLMRouterJudge
 }
 
 // New returns a Router with the given configuration.
 func New(cfg *config.Config) *Router {
-	return &Router{cfg: cfg}
+	useLLM := strings.EqualFold(os.Getenv("ROUTER_USE_LLM"), "true") || os.Getenv("ROUTER_USE_LLM") == "1"
+	j := NewLLMRouterJudge()
+	if j == nil {
+		useLLM = false
+	}
+	return &Router{
+		cfg:      cfg,
+		useLLM:   useLLM,
+		llmJudge: j,
+	}
 }
 
 // Route evaluates the venues available in a matched pair and selects the best one
@@ -121,7 +133,27 @@ func (r *Router) Route(order *Order, pair *matcher.MatchResult) *RoutingDecision
 		FinalScore:    best.TotalScore,
 	}
 
+	var llmChoice *LLMRouteDecision
+	if r.useLLM && r.llmJudge != nil {
+		if choice, err := r.llmJudge.Decide(order, pair, scores, r.cfg); err == nil && choice != nil {
+			llmChoice = choice
+			for _, s := range scores {
+				if strings.EqualFold(string(s.Market.VenueID), llmChoice.SelectedVenue) {
+					decision.SelectedVenue = s.Market
+					decision.FinalScore = s.TotalScore
+					break
+				}
+			}
+		}
+	}
+
 	decision.Explanation = r.buildExplanation(decision, scores)
+	if llmChoice != nil {
+		decision.Explanation += "\n\n── LLM Judge ───────────────────────────────────────────\n"
+		decision.Explanation += fmt.Sprintf("Model: %s | confidence=%.2f | selected=%s\n",
+			r.llmJudge.model, llmChoice.Confidence, llmChoice.SelectedVenue)
+		decision.Explanation += fmt.Sprintf("Reason: %s\n", llmChoice.Reasoning)
+	}
 	return decision
 }
 

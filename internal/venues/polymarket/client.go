@@ -66,14 +66,31 @@ func (c *Client) FetchMarkets(ctx context.Context) ([]*venues.RawMarket, error) 
 // FetchMarketsByQuery retrieves markets using Polymarket's public-search endpoint.
 // No fallback — if public-search returns nothing, we return nothing.
 func (c *Client) FetchMarketsByQuery(ctx context.Context, query string) ([]*venues.RawMarket, error) {
+	markets, _, err := c.FetchMarketsByQueryPaged(ctx, query, 0)
+	return markets, err
+}
+
+// FetchMarketsByQueryPaged fetches one page of search results using offset.
+// Returns markets and the next offset (0 means no more pages).
+func (c *Client) FetchMarketsByQueryPaged(ctx context.Context, query string, offset int) ([]*venues.RawMarket, int, error) {
 	q := strings.TrimSpace(query)
 	if q == "" {
-		return []*venues.RawMarket{}, nil
+		return []*venues.RawMarket{}, 0, nil
 	}
 
-	u := fmt.Sprintf("%s?q=%s&keep_closed_markets=0&optimized=true&cache=true", c.searchAPIURL, url.QueryEscape(q))
+	u := fmt.Sprintf("%s?q=%s&keep_closed_markets=0&optimized=true&cache=true&offset=%d",
+		c.searchAPIURL, url.QueryEscape(q), offset)
 	fmt.Printf("[polymarket] GET %s\n", u)
-	return c.fetchPublicSearch(ctx, u)
+	markets, err := c.fetchPublicSearch(ctx, u)
+	if err != nil {
+		return nil, 0, err
+	}
+	// If we got a full page, there may be more
+	nextOffset := 0
+	if len(markets) >= 20 {
+		nextOffset = offset + len(markets)
+	}
+	return markets, nextOffset, nil
 }
 
 // polymarketTagSlugs maps normalized category names to Polymarket tag slugs.
@@ -545,23 +562,27 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		}
 
 		payload := map[string]interface{}{
-			"id":            mkt.Slug,
-			"slug":          mkt.Slug,
-			"question":      mkt.Question,
-			"endDateIso":    ev.EndDate,
-			"active":        mkt.Active,
-			"closed":        mkt.Closed,
-			"outcomePrices": outcomePricesStr,
-			"bestBid":       mkt.BestBid,
-			"bestAsk":       mkt.BestAsk,
-			"spread":        mkt.Spread,
-			"image":         ev.Image,
+			"id":             mkt.Slug,
+			"slug":           mkt.Slug,
+			"question":       mkt.Question,
+			"groupItemTitle": mkt.GroupItemTitle,
+			"endDateIso":     ev.EndDate,
+			"active":         mkt.Active,
+			"closed":         mkt.Closed,
+			"outcomePrices":  outcomePricesStr,
+			"bestBid":        mkt.BestBid,
+			"bestAsk":        mkt.BestAsk,
+			"spread":         mkt.Spread,
+			"image":          ev.Image,
 		}
 
 		// Overlay liquidity and volume from full market data if available.
 		if full, ok := slugToFull[mkt.Slug]; ok {
 			payload["liquidityNum"] = full.LiquidityNum
 			payload["volume24hr"] = full.Volume24hr
+			if full.ClobTokenIDs != "" {
+				payload["clobTokenIds"] = full.ClobTokenIDs
+			}
 		}
 
 		b, err := json.Marshal(payload)
@@ -604,6 +625,7 @@ type searchEntry struct {
 type fullMarketData struct {
 	LiquidityNum float64 `json:"liquidityNum"`
 	Volume24hr   float64 `json:"volume24hr"`
+	ClobTokenIDs string  `json:"clobTokenIds"`
 }
 
 // fetchFullBySlug does a single batch GET /markets?slug=...&slug=... and returns
@@ -651,6 +673,7 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 		Slug         string  `json:"slug"`
 		LiquidityNum float64 `json:"liquidityNum"`
 		Volume24hr   float64 `json:"volume24hr"`
+		ClobTokenIDs string  `json:"clobTokenIds"`
 	}
 	if err := json.Unmarshal(body, &markets); err != nil {
 		fmt.Printf("[polymarket] WARNING: fetchFullBySlug parse: %v\n", err)
@@ -659,7 +682,11 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 
 	for _, m := range markets {
 		if m.Slug != "" {
-			result[m.Slug] = fullMarketData{LiquidityNum: m.LiquidityNum, Volume24hr: m.Volume24hr}
+			result[m.Slug] = fullMarketData{
+				LiquidityNum: m.LiquidityNum,
+				Volume24hr:   m.Volume24hr,
+				ClobTokenIDs: m.ClobTokenIDs,
+			}
 		}
 	}
 	fmt.Printf("[polymarket] enriched %d/%d markets with liquidity data\n", len(result), len(entries))

@@ -40,7 +40,7 @@ func main() {
 }
 
 func run() error {
-	mode := flag.String("mode", "route", "run mode: route or match")
+	mode := flag.String("mode", "route", "run mode: route, match, or llm-eval")
 	side := flag.String("side", string(router.SideYes), "order side: YES or NO")
 	maxPairs := flag.Int("max-pairs", 10, "maximum pairs to output")
 	numMarkets := flag.Int("n", 10, "number of markets to fetch from each venue")
@@ -66,6 +66,20 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	if strings.ToLower(*mode) == "llm-eval" {
+		llm := matcher.NewLLMMatcher()
+		report, err := matcher.EvaluateLLM(ctx, llm, matcher.DefaultLLMEvalSet())
+		if err != nil {
+			return err
+		}
+		if jsonMode {
+			fmt.Println(string(mustJSON(report)))
+			return nil
+		}
+		printLLMEvalReport(report)
+		return nil
+	}
 
 	norm := normalizer.New(cfg)
 	polyClient := polymarket.New(cfg.HTTPTimeout, cfg.PolymarketSearchAPI, *numMarkets)
@@ -125,7 +139,7 @@ func run() error {
 	allResults := append(polyToKalshi, kalshiToPoly...)
 
 	// ── 3. Score and match ──────────────────────────────────────────────────
-	pairs := mtch.FindEquivalentPairsFromSearch(ctx, allResults)
+	pairs := mtch.FindEquivalentPairsFromSearch(ctx, allResults, "")
 	logf("\n[main] Found %d equivalent pairs\n", len(pairs))
 
 	if len(pairs) == 0 {
@@ -181,6 +195,30 @@ func run() error {
 	}
 
 	return nil
+}
+
+func printLLMEvalReport(report *matcher.LLMEvalReport) {
+	fmt.Printf("[llm-eval] model=%s min_confidence=%.2f total=%d\n",
+		report.Model, report.MinConfidence, report.Total)
+	fmt.Printf("[llm-eval] tp=%d fp=%d tn=%d fn=%d\n",
+		report.TruePositives, report.FalsePositives, report.TrueNegatives, report.FalseNegatives)
+	fmt.Printf("[llm-eval] accuracy=%.3f precision=%.3f recall=%.3f f1=%.3f\n",
+		report.Accuracy, report.Precision, report.Recall, report.F1)
+	for _, r := range report.Results {
+		status := "OK"
+		if r.ExpectMatch != r.PredictedMatch {
+			status = "MISS"
+		}
+		fmt.Printf("  - [%s] %s | expect=%t predicted=%t decision=%s conf=%.2f\n",
+			status, r.Name, r.ExpectMatch, r.PredictedMatch, r.Decision, r.Confidence)
+		if r.Err != "" {
+			fmt.Printf("      error: %s\n", r.Err)
+			continue
+		}
+		if r.Reasoning != "" {
+			fmt.Printf("      reason: %s\n", r.Reasoning)
+		}
+	}
 }
 
 // ─── JSON helpers ───────────────────────────────────────────────────────────

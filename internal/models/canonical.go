@@ -45,10 +45,13 @@ type CanonicalMarket struct {
 	VenueSeriesTicker string `json:"venue_series_ticker,omitempty"` // Kalshi series ticker for URL construction
 	VenueEventTitle   string `json:"venue_event_title,omitempty"`   // Event-level title for URL slug construction
 	VenueSlug         string `json:"venue_slug,omitempty"`
+	VenueYesTokenID   string `json:"venue_yes_token_id,omitempty"` // Polymarket YES token/asset id (for live market WS)
 
 	// --- Human-readable description ---
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
+	Title           string `json:"title"`
+	Subtitle        string `json:"subtitle,omitempty"`         // specific option within a group: Poly groupItemTitle / Kalshi subtitle
+	NormalizedTitle string `json:"normalized_title,omitempty"` // LLM-normalized canonical form for matching; falls back to Title if unset
+	Description     string `json:"description,omitempty"`
 	Category    string   `json:"category,omitempty"` // Normalized broad category (see NormalizeCategory)
 	Tags        []string `json:"tags,omitempty"`
 	ImageURL    string   `json:"image_url,omitempty"` // Display image for FE (light-mode / default)

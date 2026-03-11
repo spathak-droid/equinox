@@ -34,6 +34,9 @@ go run ./cmd/equinox -mode=route -side=YES -max-pairs=10
 # Output machine-readable results
 go run ./cmd/equinox -mode=match -output=json
 
+# Run the built-in LLM matching eval suite
+OPENAI_API_KEY=sk-... go run ./cmd/equinox -mode=llm-eval
+
 # Offline deterministic run from testdata fixture
 go run ./cmd/equinox -mock -mock-path=testdata/markets.mock.json -mode=match -output=json
 
@@ -74,6 +77,10 @@ All config is via environment variables. Defaults are production-ready for a pro
 | Variable | Default | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | _(empty)_ | Enables embedding-based matching. Falls back to rules-only if unset. |
+| `OPEN_AI_MODEL` | `gpt-4o-mini` | OpenAI chat model used for LLM-assisted pair disambiguation. |
+| `LLM_MIN_CONFIDENCE` | `0.80` | Minimum LLM confidence required before a `match` decision is accepted. |
+| `ROUTER_USE_LLM` | `false` | If `true`, asks the LLM to judge final venue routing using price/liquidity/spread/volume + weights. |
+| `ROUTER_LLM_MIN_CONFIDENCE` | `0.70` | Minimum confidence required to accept LLM routing choice; otherwise deterministic router is used. |
 | `KALSHI_API_KEY` | _(empty)_ | Required for Kalshi auth endpoints. Public markets work without it. |
 | `MATCH_THRESHOLD` | `0.45` | Composite score above which markets are declared equivalent. |
 | `PROBABLE_MATCH_THRESHOLD` | `0.35` | Score range flagged for disambiguation review. |

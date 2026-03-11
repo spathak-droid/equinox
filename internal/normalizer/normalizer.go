@@ -75,9 +75,11 @@ type polymarketRaw struct {
 	BestBid       float64 `json:"bestBid"`
 	BestAsk       float64 `json:"bestAsk"`
 	Spread        float64 `json:"spread"`
+	ClobTokenIDs  string  `json:"clobTokenIds"` // JSON array string: "[\"yesToken\",\"noToken\"]"
 	Tags          []struct {
 		Label string `json:"label"`
 	} `json:"tags"`
+	GroupItemTitle string `json:"groupItemTitle"` // specific option within a grouped market, e.g. "Spain"
 	Events []struct {
 		Slug string `json:"slug"`
 	} `json:"events"`
@@ -116,7 +118,8 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		VenueMarketID:    marketID,
 		VenueEventTicker: eventSlug,
 		VenueSlug:        raw.Slug,
-		Title:            raw.Question,
+		Title:         raw.Question,
+		Subtitle:      raw.GroupItemTitle,
 		Description:   raw.Description,
 		Category:      models.NormalizeCategory(strings.ToLower(raw.Category)),
 		ImageURL:      raw.Image,
@@ -126,6 +129,15 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		UpdatedAt:     time.Now(),
 		CreatedAt:     time.Now(),
 		RawPayload:    r.Payload,
+	}
+
+	// Polymarket exposes orderbook asset IDs as clobTokenIds. Index 0 is typically
+	// the YES token for binary markets.
+	if raw.ClobTokenIDs != "" {
+		var ids []string
+		if err := json.Unmarshal([]byte(raw.ClobTokenIDs), &ids); err == nil && len(ids) > 0 {
+			m.VenueYesTokenID = ids[0]
+		}
 	}
 
 	// Tags
@@ -226,7 +238,8 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		VenueEventTicker:  raw.EventTicker,
 		VenueSeriesTicker: raw.SeriesTicker,
 		VenueEventTitle:   raw.EventTitle,
-		Title:             kalshiCanonicalTitle(raw.EventTitle, raw.Subtitle),
+		Title:         kalshiCanonicalTitle(raw.EventTitle, raw.Subtitle),
+		Subtitle:      raw.Subtitle,
 		Description:   raw.Subtitle,
 		Category:      cat,
 		YesPrice:      yesMid,

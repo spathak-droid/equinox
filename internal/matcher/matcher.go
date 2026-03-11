@@ -266,6 +266,15 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 		}
 	}
 
+	// Semantic gate: reject template matches with different specific entities
+	// (e.g., "Spain wins World Cup" vs "Iran to compete in World Cup").
+	if disjointSpecificEntities(a.Title, b.Title) {
+		result.Confidence = ConfidenceNoMatch
+		result.EventMatchScore = EventMatchScore(sigA, sigB)
+		result.Explanation = "Semantic gate rejection: specific entities differ with no overlap"
+		return result
+	}
+
 	// Stage 2: Fuzzy title match
 	result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
 
@@ -648,6 +657,44 @@ func min3(a, b, c int) int {
 		return b
 	}
 	return c
+}
+
+var genericEntityTokens = map[string]bool{
+	"fifa": true, "world": true, "cup": true, "game": true, "games": true,
+	"olympics": true, "election": true, "presidential": true, "candidate": true,
+	"market": true, "price": true, "year": true, "yes": true, "no": true,
+}
+
+// disjointSpecificEntities returns true when both titles contain specific named
+// entities but share none of them after removing generic template tokens.
+func disjointSpecificEntities(aTitle, bTitle string) bool {
+	aRaw := extractEntities(aTitle)
+	bRaw := extractEntities(bTitle)
+	if len(aRaw) == 0 || len(bRaw) == 0 {
+		return false
+	}
+
+	aSet := map[string]bool{}
+	for _, e := range aRaw {
+		if !genericEntityTokens[e] {
+			aSet[e] = true
+		}
+	}
+	bSet := map[string]bool{}
+	for _, e := range bRaw {
+		if !genericEntityTokens[e] {
+			bSet[e] = true
+		}
+	}
+	if len(aSet) == 0 || len(bSet) == 0 {
+		return false
+	}
+	for e := range aSet {
+		if bSet[e] {
+			return false
+		}
+	}
+	return true
 }
 
 // cosineSimilarity computes the cosine similarity between two float32 vectors.

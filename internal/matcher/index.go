@@ -153,9 +153,18 @@ func extractEntities(title string) []string {
 		if !unicode.IsUpper(first) {
 			continue
 		}
-		// Skip first word (sentence-start capitalization)
+		// Skip first word only when it's a question lead word ("Will", "Can", ...).
+		// Keep true entities that appear first (e.g., "Iran to compete ...").
 		if i == 0 {
-			continue
+			lead := strings.ToLower(strings.TrimFunc(w, func(r rune) bool {
+				return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+			}))
+			switch lead {
+			case "will", "can", "is", "are", "was", "were", "do", "does", "did",
+				"has", "have", "had", "should", "could", "would",
+				"who", "what", "when", "where", "why", "how":
+				continue
+			}
 		}
 		// Clean punctuation and lowercase for matching
 		cleaned := strings.ToLower(strings.TrimFunc(w, func(r rune) bool {

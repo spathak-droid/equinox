@@ -168,7 +168,18 @@ func (c *Client) FetchMarketsByQuery(ctx context.Context, query string) ([]*venu
 	if q == "" {
 		return nil, nil
 	}
-	return c.search(ctx, q, "", "querymatch", 100)
+	markets, _, err := c.searchPaged(ctx, q, "", "querymatch", 100, "")
+	return markets, err
+}
+
+// FetchMarketsByQueryPaged fetches one page of query results. Pass cursor=""
+// for the first page; subsequent pages use the returned nextCursor.
+func (c *Client) FetchMarketsByQueryPaged(ctx context.Context, query, cursor string, pageSize int) ([]*venues.RawMarket, string, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil, "", nil
+	}
+	return c.searchPaged(ctx, q, "", "querymatch", pageSize, cursor)
 }
 
 // ─── FetchMarketsByCategory ─────────────────────────────────────────────────
@@ -212,6 +223,11 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 // search calls GET /v1/search/series with the given parameters and returns
 // flattened RawMarkets. This is the single entry point for all Kalshi data.
 func (c *Client) search(ctx context.Context, query, category, orderBy string, limit int) ([]*venues.RawMarket, error) {
+	markets, _, err := c.searchPaged(ctx, query, category, orderBy, limit, "")
+	return markets, err
+}
+
+func (c *Client) searchPaged(ctx context.Context, query, category, orderBy string, limit int, cursor string) ([]*venues.RawMarket, string, error) {
 	params := url.Values{}
 	if query != "" {
 		params.Set("query", query)
@@ -223,21 +239,24 @@ func (c *Client) search(ctx context.Context, query, category, orderBy string, li
 		params.Set("order_by", orderBy)
 	}
 	if limit > 100 {
-		limit = 100 // v1 API caps around 100
+		limit = 100
 	}
 	params.Set("page_size", fmt.Sprintf("%d", limit))
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
 
 	u := c.searchBase + "?" + params.Encode()
 	fmt.Printf("[kalshi] GET %s\n", u)
 
 	body, err := c.doGet(ctx, u)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	var resp searchResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("kalshi search unmarshal: %w", err)
+		return nil, "", fmt.Errorf("kalshi search unmarshal: %w", err)
 	}
 
 	markets := flattenHits(resp.CurrentPage)
@@ -262,7 +281,7 @@ func (c *Client) search(ctx context.Context, query, category, orderBy string, li
 		}
 		fmt.Printf("[kalshi]   [%d] %s (bid=%d ask=%d)\n", i+1, title, p.YesBid, p.YesAsk)
 	}
-	return markets, nil
+	return markets, resp.NextCursor, nil
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
