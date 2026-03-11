@@ -198,65 +198,85 @@ The matcher and router require **zero changes**.
 ### Definition
 
 Two markets are considered equivalent when:
-1. They represent the **same binary question** (e.g. "Will X win election Y?")
+1. They represent the **same binary question** (e.g. "Will Chelsea win the Premier League?")
 2. Their YES outcomes refer to the **same real-world result**
 3. They are expected to resolve within **`MAX_DATE_DELTA_DAYS`** of each other
 
-### Methodology
+This is harder than it sounds. Polymarket asks "Will Chelsea win the 2025-26 English Premier League?" while Kalshi phrases the same question as "English Premier League Winner? — Chelsea". Edit distance says these are different strings. A human instantly sees they're the same bet.
 
-We use a four-stage pipeline:
+### Discovery: cross-search matching
 
-**Stage 1 — Hard filters** _(applied first; fast, zero cost)_
+The naive approach to cross-venue matching is O(n^2): compare every Polymarket market against every Kalshi market. With 100 markets per venue, that's 10,000 comparisons — most of which are obviously unrelated.
+
+Instead, we use **cross-search**: each venue's markets become search queries against the other venue's API. A Polymarket market about Chelsea triggers a Kalshi search for "Chelsea Premier League", which returns only the handful of relevant Kalshi markets. This reduces candidate pairs from ~10,000 to ~50-100, with much higher signal density.
+
+The cross-search pipeline (`matcher/search.go`):
+1. Clean each market title into a search query (strip "Will", question marks, date suffixes)
+2. Search the opposing venue's API with that query
+3. Rank results by token Jaccard similarity to the source title
+4. Send top candidates through the scoring pipeline
+
+Fallback: when search APIs are unavailable (mock mode, API errors), we fall back to brute-force Jaccard cross-pollination over the full market pools.
+
+### Scoring pipeline
+
+Once candidate pairs are identified, each pair runs through a multi-signal scoring pipeline:
+
+**Signal 1 — Hard filters** _(applied first; fast, zero cost)_
 - Both markets must be active
 - If both have resolution dates: `|dateA - dateB| <= MAX_DATE_DELTA_DAYS`
-- Markets missing resolution dates are not date-filtered but may still match on content
 
-**Stage 2 — Fuzzy title similarity** _(always applied)_
-- Normalized edit distance (Levenshtein) on cleaned titles
-- Keyword Jaccard overlap after stopword removal
-- `fuzzyScore = 0.5 × editSim + 0.5 × jaccardSim`
+**Signal 2 — Fuzzy title similarity** _(always applied)_
+- Normalized Levenshtein distance + keyword Jaccard overlap after stopword removal
+- `fuzzyScore = 0.5 * editSim + 0.5 * jaccardSim`
 
-**Stage 3 — Embedding cosine similarity** _(applied when OPENAI_API_KEY is set)_
-- OpenAI `text-embedding-3-small` embeddings of market `title` text
-- Batched in a single API call to minimize cost
-- `cosineSimilarity(embeddingA, embeddingB)`
-- Skipped when no API key; matcher falls back to fuzzy-only
+**Signal 3 — Entity overlap** _(always applied)_
+- Extract named entities from both titles (proper nouns, numbers, known synonyms)
+- Jaccard overlap of entity sets
+- This catches pairs like "Chelsea win Premier League" vs "Premier League Winner — Chelsea" that have low fuzzy scores but share all key entities
 
-**Stage 4 — LLM pairwise disambiguation** _(applied when OPENAI_API_KEY is set)_
-- Runs only for pairs where `composite` is in `[PROBABLE_MATCH_THRESHOLD, MATCH_THRESHOLD)`
-- If title embeddings were unavailable, we still attempt disambiguation for ambiguous pairs when OpenAI is configured.
-- OpenAI returns `match`, `no_match`, or `unsure` per pair
-- `match` upgrades confidence to MATCH
-- `no_match` removes the pair
-- `unsure` keeps it as PROBABLE_MATCH
+**Signal 4 — Embedding cosine similarity** _(when OPENAI_API_KEY is set)_
+- OpenAI `text-embedding-3-small` vectors, batched in a single API call
+- Handles paraphrasing and abbreviation differences that string matching misses
+
+**Signal 5 — LLM pairwise disambiguation** _(when OPENAI_API_KEY is set)_
+- Ambiguous pairs are sent to a chat model for pairwise `match` / `no_match` / `unsure`
+- LLM confidence is downgraded proportionally when fuzzy/entity signals are weak — this prevents the LLM from hallucinating matches between topically-related but non-equivalent markets
+- Requires at least one corroborating signal (entity overlap >= 0.40, event match >= 0.60, or rule composite >= 0.35) before accepting an LLM match
 
 **Composite score:**
 ```
-if embeddings available:  composite = 0.40 × fuzzy + 0.60 × embedding
-if embeddings absent:     composite = fuzzy
+with embeddings:    composite = 0.40 * fuzzy + 0.60 * embedding
+without embeddings: composite = fuzzy
 ```
 
 **Classification:**
 ```
-composite >= MATCH_THRESHOLD          → MATCH
-composite >= PROBABLE_MATCH_THRESHOLD → PROBABLE_MATCH (or MATCH after LLM disambiguation when OPENAI_API_KEY is set)
-else                                  → NO_MATCH
+composite >= MATCH_THRESHOLD (0.45)          → MATCH
+composite >= PROBABLE_MATCH_THRESHOLD (0.35) → PROBABLE_MATCH
+else                                         → NO_MATCH
 ```
 
-### Why this approach?
+LLM disambiguation can upgrade PROBABLE_MATCH to MATCH or downgrade to NO_MATCH.
 
-- **Rules alone** are brittle to paraphrasing: "Will the Fed cut rates?" vs "Federal Reserve rate cut in June?" scores low on edit distance but high on embedding similarity.
-- **Embeddings alone** can match semantically related but non-equivalent markets (e.g. two different Fed meetings). The date filter is the critical guard.
-- **Hybrid** gives us the best of both: cheap rules eliminate obvious non-matches early, embeddings handle paraphrasing and abbreviations.
+### Why not just use embeddings? Why not just use an LLM?
+
+Each signal alone has failure modes. The hybrid approach uses cheap signals to filter and expensive signals to disambiguate:
+
+- **Fuzzy matching alone** fails on paraphrasing: "Will the Fed cut rates?" vs "Federal Reserve rate reduction in June?" scores low on edit distance despite being the same question.
+- **Embeddings alone** match semantically related but non-equivalent markets. "Fed rate cut March 2026" and "Fed rate cut June 2026" embed almost identically — the date filter is the critical guard.
+- **LLM alone** is expensive and can hallucinate. Sending every possible pair through GPT-4 is neither practical nor reliable. We observed the LLM confidently matching "Will Chelsea win the Premier League?" with "Will Arsenal win the Premier League?" (0.90 confidence) because both are about the same league. The entity overlap gate catches this — Chelsea != Arsenal.
+- **The hybrid** uses rules to eliminate 95% of candidates cheaply, embeddings to handle paraphrasing, entity overlap to verify subject identity, and the LLM as a final tiebreaker only where signals disagree.
 
 ### Known failure modes
 
 | Scenario | Behavior | Mitigation |
 |---|---|---|
-| Monthly rolling contracts (same question, different dates) | May match if dates are close | Reduce MAX_DATE_DELTA_DAYS |
-| Short generic titles ("Will inflation rise?") | High fuzzy score regardless of date | Date filter is primary guard |
-| Markets with no resolution date | Excluded from date filtering | Still matched via content score |
-| Venue returns malformed JSON | Market skipped, warning logged | Partial failure is acceptable |
+| Same question, different time periods (monthly rolling) | May match if dates are close | Reduce `MAX_DATE_DELTA_DAYS` |
+| Generic titles ("Will inflation rise?") | False positive risk from high fuzzy scores | Date filter + entity gate |
+| Categorical vs binary framing | "EPL Winner — Chelsea" vs "Will Chelsea win EPL?" | Entity overlap + LLM disambiguation |
+| Markets with no resolution date | Cannot date-filter | Must rely on content signals alone |
+| Venue API returns errors | Markets from that venue skipped | Partial results, never a crash |
 
 ---
 
@@ -288,31 +308,82 @@ The venue with the highest `routingScore` is selected. Ties broken by index (det
 
 ### Sample output
 
+From a live run matching "Will Chelsea win the 2025-26 English Premier League?" across Polymarket and Kalshi:
+
 ```
 ═══════════════════════════════════════════════════════════
 ROUTING DECISION
 ═══════════════════════════════════════════════════════════
-Order:   YES Will the Fed cut rates in June? @ $1000.00
-Markets: polymarket / kalshi
-Match confidence: MATCH (score=0.891)
+Order:   BUY YES on "Will Chelsea win the 2025–26 English Premier League?" for $1000
+Markets: polymarket vs kalshi
+Match:   PROBABLE_MATCH (confidence=0.519)
 
-Venue scores:
-  [polymarket] total=0.6142 | yes_price=0.6200 (score=0.3800) | liquidity=$42000 (score=0.9999) | spread=N/A (score=0.5 neutral)
-▶ [kalshi]     total=0.6731 | yes_price=0.5800 (score=0.4200) | liquidity=$18000 (score=0.9999) | spread=0.0400 (score=0.800)
+── Venue Comparison ────────────────────────────────────
+▶ [polymarket] score=0.9972
+    Price:     YES share costs $0.0030 → $1000 buys ~333333 shares
+    Liquidity: $403508 available ✓ covers $1000 order fully
+    Spread:    0.0020 (20 bps) — very tight
+  [kalshi] score=0.9920
+    Price:     YES share costs $0.0050 → $1000 buys ~200000 shares
+    Liquidity: $2628943 available ✓ covers $1000 order fully
+    Spread:    0.0100 (100 bps) — reasonable
 
-Weights: price=60% liquidity=30% spread=10%
+── Weights ─────────────────────────────────────────────
+   Price=60%  Liquidity=30%  Spread=10%
 
-✅ SELECTED: kalshi (score=0.6731)
-   Title: Fed Rate Cut June 2025
-   Yes price: 0.5800 | Liquidity: $18000 | Spread: 0.0400
+── Why polymarket? ─────────────────────────────────────
+   1. Better price: YES shares cost $0.0030 vs $0.0050 on kalshi — 40.0% cheaper.
+   2. Liquidity is lower ($403508 vs $2628943), but price advantage outweighs this.
+   3. Tighter spread: 20 bps vs 100 bps — lower hidden execution cost.
+
+── Estimated Execution ─────────────────────────────────
+   Venue:           polymarket
+   Side:            BUY YES
+   Cost per share:  $0.0030
+   Order size:      $1000
+   Shares:          ~333333
+   If correct:      $333333 payout ($332333 profit, 33233% return)
 ═══════════════════════════════════════════════════════════
 ```
 
-### Tradeoffs
+The router doesn't just pick a venue — it explains *why* in plain English, breaking down each factor's contribution and estimating concrete execution outcomes.
 
-- Price is weighted highest (60%) because in a frictionless simulation, price is the primary determinant of execution quality.
-- Liquidity (30%) ensures we don't route to a venue that can't absorb the order — but we don't hard-exclude venues with insufficient liquidity, since partial fills may be acceptable.
-- Spread (10%) is a secondary quality signal; many venues don't report it, so it's weighted low to avoid penalizing venues unfairly.
+---
+
+## Design Decisions & Tradeoffs
+
+### Why cross-search instead of brute-force matching?
+
+Brute-force O(n^2) comparison works in a prototype with 20 markets per venue. It doesn't work with 500+. Cross-search reduces the problem from "compare everything" to "for each market, ask the other venue what's similar." This is the same approach a human would take — you wouldn't read every Kalshi market to find the one that matches a Polymarket question. You'd search.
+
+The tradeoff: cross-search depends on venue search API quality. If Kalshi's search doesn't return a relevant result, we miss the pair. We mitigate this with a brute-force Jaccard fallback after search completes.
+
+### Why weight price at 60%, liquidity at 30%, spread at 10%?
+
+Price is the dominant factor because in a frictionless simulation, getting a better price per share directly determines returns. A 2-cent price difference on a $1000 order matters more than a liquidity difference when both venues can fill the order.
+
+Liquidity at 30% ensures we penalize venues that can't absorb the order size — but we don't hard-exclude them. A venue with $500 liquidity for a $1000 order gets a low score but isn't rejected, because partial fills may be acceptable and liquidity fluctuates.
+
+Spread at 10% because many venues don't report it. Polymarket's summary API doesn't include spread; Kalshi does. Weighting spread heavily would systematically penalize Polymarket for missing data, not for bad execution quality. We score missing spread as 0.5 (neutral) rather than 0.0 (worst) for the same reason.
+
+These weights are configurable via environment variables. A production system would A/B test weight combinations against historical execution data.
+
+### Why tanh for liquidity scoring?
+
+`tanh(liquidity / order_size)` produces a smooth [0, 1) curve that:
+- Returns ~0 when liquidity is near zero
+- Returns ~0.5 when liquidity equals order size
+- Saturates near 1.0 when liquidity far exceeds order size
+
+This avoids the cliff-edge problem of a hard threshold ("reject if liquidity < order size") while still meaningfully penalizing thin venues. The alternative — linear scaling — would give a venue with $10M liquidity a 10x better score than one with $1M, which overstates the difference for a $1000 order. tanh captures diminishing returns.
+
+### Why require corroborating signals for LLM matches?
+
+Early testing showed the LLM confidently matching topically-related but non-equivalent markets. "Will Chelsea win the EPL?" and "Will Arsenal win the EPL?" both discuss the same league, same season, same sport — an LLM sees high semantic similarity. But they're opposite bets.
+
+We require at least one of: entity overlap >= 0.40, event match score >= 0.60, rule composite >= 0.35, or a signature match. This ensures the LLM's judgment is backed by at least one structural signal, not just vibes.
+
+The tradeoff: this makes the system more conservative. Some genuine matches with unusual title structures may be classified as PROBABLE_MATCH instead of MATCH. We accept this — a false negative (missed match) is far less costly than a false positive (routing a trade to the wrong market).
 
 ---
 

@@ -23,6 +23,7 @@ import (
 	"github.com/equinox/config"
 	"github.com/equinox/internal/matcher"
 	"github.com/equinox/internal/models"
+	"github.com/equinox/internal/news"
 	"github.com/equinox/internal/normalizer"
 	"github.com/equinox/internal/router"
 	"github.com/equinox/internal/venues/kalshi"
@@ -45,6 +46,7 @@ func run() error {
 	maxPairs := flag.Int("max-pairs", 10, "maximum pairs to output")
 	numMarkets := flag.Int("n", 10, "number of markets to fetch from each venue")
 	output := flag.String("output", "text", "output format: text or json")
+	newsFlag := flag.Bool("news", false, "fetch related news articles for matched pairs")
 	flag.Parse()
 
 	orderSide := router.SideYes
@@ -150,12 +152,22 @@ func run() error {
 		return nil
 	}
 
-	// ── 4. Output ───────────────────────────────────────────────────────────
-	r := router.New(cfg)
+	// ── 4. News (optional) ──────────────────────────────────────────────────
+	newsEnabled := *newsFlag || cfg.NewsEnabled
 	pairLimit := len(pairs)
 	if *maxPairs > 0 && pairLimit > *maxPairs {
 		pairLimit = *maxPairs
 	}
+
+	var pairNews []*news.MarketNews
+	if newsEnabled && len(pairs) > 0 {
+		logf("\n[main] Fetching related news for %d pairs...\n", pairLimit)
+		newsFetcher := news.NewFetcher(cfg.HTTPTimeout, cfg.NewsMaxArticles)
+		pairNews = newsFetcher.FetchForPairs(ctx, pairs[:pairLimit])
+	}
+
+	// ── 5. Output ───────────────────────────────────────────────────────────
+	r := router.New(cfg)
 
 	var jsonMatches []jsonMatchSummary
 	var jsonDecisions []jsonRoutingDecision
@@ -169,29 +181,41 @@ func run() error {
 				i+1, pair.MarketA.VenueID, pair.MarketB.VenueID,
 				pair.Confidence, pair.CompositeScore,
 				pair.MarketA.Title, pair.MarketB.Title)
-			continue
+		} else {
+			decision := r.Route(&router.Order{
+				EventTitle: pair.MarketA.Title,
+				Side:       orderSide,
+				SizeUSD:    cfg.DefaultOrderSize,
+			}, pair)
+
+			if jsonMode {
+				jsonDecisions = append(jsonDecisions, newJSONDecision(decision))
+			} else {
+				fmt.Println(decision.Explanation)
+			}
 		}
 
-		decision := r.Route(&router.Order{
-			EventTitle: pair.MarketA.Title,
-			Side:       orderSide,
-			SizeUSD:    cfg.DefaultOrderSize,
-		}, pair)
-
-		if jsonMode {
-			jsonDecisions = append(jsonDecisions, newJSONDecision(decision))
-		} else {
-			fmt.Println(decision.Explanation)
+		// Print news for this pair (text mode)
+		if !jsonMode && i < len(pairNews) && pairNews[i] != nil {
+			printPairNews(pairNews[i])
 		}
 	}
 
 	if jsonMode {
-		fmt.Println(string(mustJSON(map[string]any{
+		output := map[string]any{
 			"mode":              *mode,
 			"matches":           jsonMatches,
 			"routing_decisions": jsonDecisions,
 			"summary":           summarizePairs(pairs),
-		})))
+		}
+		if len(pairNews) > 0 {
+			jsonNewsItems := make([]any, len(pairNews))
+			for i, mn := range pairNews {
+				jsonNewsItems[i] = mn
+			}
+			output["news"] = jsonNewsItems
+		}
+		fmt.Println(string(mustJSON(output)))
 	}
 
 	return nil
@@ -218,6 +242,42 @@ func printLLMEvalReport(report *matcher.LLMEvalReport) {
 		if r.Reasoning != "" {
 			fmt.Printf("      reason: %s\n", r.Reasoning)
 		}
+	}
+}
+
+func printPairNews(mn *news.MarketNews) {
+	if mn.Error != "" && len(mn.Articles) == 0 {
+		return // silently skip failed news fetches
+	}
+	fmt.Println("  ── Related News ──────────────────────────")
+	fmt.Printf("     Query: %q\n", mn.Query)
+	if len(mn.Articles) == 0 {
+		fmt.Println("     (no articles found)")
+	}
+	for j, article := range mn.Articles {
+		age := formatAge(article.PublishedAt)
+		src := article.Source
+		if src == "" {
+			src = "Unknown"
+		}
+		fmt.Printf("     %d. %s — %s (%s)\n", j+1, article.Title, src, age)
+		fmt.Printf("        %s\n", article.URL)
+	}
+	fmt.Println()
+}
+
+func formatAge(t time.Time) string {
+	if t.IsZero() {
+		return "unknown time"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 

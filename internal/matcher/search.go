@@ -304,18 +304,20 @@ func (m *Matcher) FindEquivalentPairsFromSearch(ctx context.Context, searchResul
 				llmConf, effectiveConf, realFuzzy, lr.MarketA.Title, lr.MarketB.Title)
 		}
 
-		// Additional guardrails:
-		//  1) require the rule-based composite to clear probable threshold
-		//  2) require either decent fuzzy overlap or strong event signal
-		// This prevents same-topic-but-different-question false positives.
-		if ruleResult.CompositeScore < m.cfg.ProbableMatchThreshold {
-			fmt.Printf("[matcher/search] Rejected by composite gate: llm=%.2f rule=%.2f (<%.2f) | %q vs %q\n",
-				llmConf, ruleResult.CompositeScore, m.cfg.ProbableMatchThreshold, lr.MarketA.Title, lr.MarketB.Title)
-			continue
-		}
-		if !ruleResult.SignatureMatch && realFuzzy < 0.50 && ruleResult.EventMatchScore < 0.60 {
-			fmt.Printf("[matcher/search] Rejected by semantic gate: fuzzy=%.2f event=%.2f | %q vs %q\n",
-				realFuzzy, ruleResult.EventMatchScore, lr.MarketA.Title, lr.MarketB.Title)
+		// Guardrails: prevent same-topic-but-different-question false positives.
+		// We require at least ONE strong signal beyond the LLM:
+		//  - rule composite clears probable threshold, OR
+		//  - strong entity overlap (shared key entities), OR
+		//  - signature match, OR
+		//  - strong event match score
+		hasRuleSupport := ruleResult.CompositeScore >= m.cfg.ProbableMatchThreshold
+		hasEntitySupport := realEntity >= 0.40
+		hasEventSupport := ruleResult.EventMatchScore >= 0.60
+		hasSignature := ruleResult.SignatureMatch
+
+		if !hasRuleSupport && !hasEntitySupport && !hasEventSupport && !hasSignature {
+			fmt.Printf("[matcher/search] Rejected by composite gate: llm=%.2f rule=%.2f entity=%.2f event=%.2f | %q vs %q\n",
+				llmConf, ruleResult.CompositeScore, realEntity, ruleResult.EventMatchScore, lr.MarketA.Title, lr.MarketB.Title)
 			continue
 		}
 

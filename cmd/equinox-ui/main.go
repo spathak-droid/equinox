@@ -25,6 +25,7 @@ import (
 	"github.com/equinox/config"
 	"github.com/equinox/internal/matcher"
 	"github.com/equinox/internal/models"
+	"github.com/equinox/internal/news"
 	"github.com/equinox/internal/normalizer"
 	"github.com/equinox/internal/router"
 	"github.com/equinox/internal/venues"
@@ -67,17 +68,27 @@ type PageData struct {
 	DeepSearch       bool
 }
 
+// NewsArticleView is a single news article ready for rendering.
+type NewsArticleView struct {
+	Title  string `json:"title"`
+	Source string `json:"source"`
+	URL    string `json:"url"`
+	Age    string `json:"age"`
+}
+
 // PairView is a single matched pair ready for rendering.
 type PairView struct {
-	MarketA        MarketView `json:"market_a"`
-	MarketB        MarketView `json:"market_b"`
-	Confidence     string     `json:"confidence"`
-	FuzzyScore     float64    `json:"fuzzy_score"`
-	EmbeddingScore float64    `json:"embedding_score"`
-	CompositeScore float64    `json:"composite_score"`
-	Explanation    string     `json:"explanation"`
-	SelectedVenue  string     `json:"selected_venue"`
-	RoutingReason  string     `json:"routing_reason"`
+	MarketA        MarketView        `json:"market_a"`
+	MarketB        MarketView        `json:"market_b"`
+	Confidence     string            `json:"confidence"`
+	FuzzyScore     float64           `json:"fuzzy_score"`
+	EmbeddingScore float64           `json:"embedding_score"`
+	CompositeScore float64           `json:"composite_score"`
+	Explanation    string            `json:"explanation"`
+	SelectedVenue  string            `json:"selected_venue"`
+	RoutingReason  string            `json:"routing_reason"`
+	NewsQuery      string            `json:"news_query,omitempty"`
+	NewsArticles   []NewsArticleView `json:"news_articles,omitempty"`
 }
 
 // MarketView is a single market ready for rendering.
@@ -210,6 +221,29 @@ func main() {
 			expiresAt: time.Now().Add(2 * time.Minute),
 		})
 		emit(progressEvent{Type: "done"})
+	})
+
+	// /news returns news articles for a query as JSON.
+	http.HandleFunc("/news", func(w http.ResponseWriter, r *http.Request) {
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		if query == "" {
+			http.Error(w, "missing q", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		fetcher := news.NewFetcher(cfg.HTTPTimeout, cfg.NewsMaxArticles)
+		mn := fetcher.FetchForQuery(ctx, query)
+		var articles []NewsArticleView
+		if mn != nil {
+			articles = toNewsArticleViews(mn)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		json.NewEncoder(w).Encode(map[string]any{
+			"query":    query,
+			"articles": articles,
+		})
 	})
 
 	port := os.Getenv("PORT")
@@ -688,8 +722,13 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	}
 
 	r := router.New(cfg)
+
+	// Fetch news for all pairs (non-blocking, best-effort) — only first article per pair
+	newsFetcher := news.NewFetcher(cfg.HTTPTimeout, 1)
+	pairNews := newsFetcher.FetchForPairs(ctx, pairs)
+
 	var pairViews []PairView
-	for _, p := range pairs {
+	for i, p := range pairs {
 		order := &router.Order{
 			EventTitle: p.MarketA.Title,
 			Side:       router.SideYes,
@@ -700,7 +739,7 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 		if embScore < 0 {
 			embScore = 0
 		}
-		pairViews = append(pairViews, PairView{
+		pv := PairView{
 			MarketA:        toMarketView(p.MarketA),
 			MarketB:        toMarketView(p.MarketB),
 			Confidence:     string(p.Confidence),
@@ -710,7 +749,12 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 			Explanation:    p.Explanation,
 			SelectedVenue:  string(decision.SelectedVenue.VenueID),
 			RoutingReason:  decision.Explanation,
-		})
+		}
+		if i < len(pairNews) && pairNews[i] != nil {
+			pv.NewsQuery = pairNews[i].Query
+			pv.NewsArticles = toNewsArticleViews(pairNews[i])
+		}
+		pairViews = append(pairViews, pv)
 	}
 
 	matchCount, probableCount := 0, 0
@@ -734,7 +778,7 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	}, nil
 }
 
-// matchToPairView converts a single MatchResult to a PairView with routing.
+// matchToPairView converts a single MatchResult to a PairView with routing and news.
 func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResult) PairView {
 	order := &router.Order{
 		EventTitle: p.MarketA.Title,
@@ -746,7 +790,7 @@ func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResul
 	if embScore < 0 {
 		embScore = 0
 	}
-	return PairView{
+	pv := PairView{
 		MarketA:        toMarketView(p.MarketA),
 		MarketB:        toMarketView(p.MarketB),
 		Confidence:     string(p.Confidence),
@@ -756,6 +800,39 @@ func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResul
 		Explanation:    p.Explanation,
 		SelectedVenue:  string(decision.SelectedVenue.VenueID),
 		RoutingReason:  decision.Explanation,
+		NewsQuery:      news.BuildNewsQuery(p.MarketA, p.MarketB),
+	}
+	return pv
+}
+
+func toNewsArticleViews(mn *news.MarketNews) []NewsArticleView {
+	if mn == nil {
+		return nil
+	}
+	views := make([]NewsArticleView, 0, len(mn.Articles))
+	for _, a := range mn.Articles {
+		views = append(views, NewsArticleView{
+			Title:  a.Title,
+			Source: a.Source,
+			URL:    a.URL,
+			Age:    formatNewsAge(a.PublishedAt),
+		})
+	}
+	return views
+}
+
+func formatNewsAge(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -982,7 +1059,7 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 <title>Equinox</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
 <style>
 :root {
@@ -1018,7 +1095,7 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
   --radius-xs: 4px;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.4; -webkit-font-smoothing: antialiased; font-size: 13px; }
+body { font-family: 'Delius', -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.4; -webkit-font-smoothing: antialiased; font-size: 13px; }
 
 /* Header */
 .header { position: sticky; top: 0; z-index: 50; background: rgba(6, 8, 13, 0.9); backdrop-filter: blur(20px) saturate(180%); border-bottom: 1px solid var(--border); }
@@ -1126,6 +1203,26 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
 .pair-explain-inner { padding: 10px 12px; border-top: 1px solid var(--border); font-size: 0.73rem; color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; background: rgba(0,0,0,0.15); }
 .pair-explain-section { margin-bottom: 6px; }
 .pair-explain-label { font-size: 0.65rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+
+/* News section */
+.pair-news { padding: 10px 14px; border-top: 1px solid var(--border); background: rgba(0,0,0,0.08); }
+.pair-news-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.pair-news-icon { font-size: 14px; color: var(--accent); }
+.pair-news-title { font-size: 0.7rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.pair-news-query { font-size: 0.68rem; color: var(--text-muted); font-style: italic; margin-left: auto; }
+.news-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.news-item { display: flex; flex-direction: column; gap: 1px; }
+.news-item-header { display: flex; align-items: baseline; gap: 6px; }
+.news-item-title { font-size: 0.75rem; color: var(--text-primary); font-weight: 500; }
+.news-item-title a { color: var(--text-primary); text-decoration: none; transition: color 150ms; }
+.news-item-title a:hover { color: var(--accent-bright); }
+.news-item-meta { font-size: 0.65rem; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.news-item-source { color: var(--text-secondary); }
+.news-item-age { color: var(--text-muted); }
+.news-see-more { display: inline-flex; align-items: center; gap: 4px; margin-top: 8px; padding: 4px 12px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 999px; color: var(--accent); font-size: 0.7rem; font-weight: 500; font-family: inherit; cursor: pointer; transition: all 150ms; }
+.news-see-more:hover { border-color: var(--accent); background: var(--accent-glow); }
+.news-see-more:disabled { opacity: 0.5; cursor: default; }
+.news-see-more.is-loading .material-icons-round { animation: loaderSpin 0.9s linear infinite; }
 
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 100; }
@@ -1336,6 +1433,27 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
       </div>
     </div>
   </div>
+  {{if $p.NewsQuery}}
+  <div class="pair-news" data-news-query="{{$p.NewsQuery}}">
+    <div class="pair-news-header">
+      <span class="material-icons-round pair-news-icon">newspaper</span>
+      <span class="pair-news-title">Related News</span>
+    </div>
+    <ul class="news-list">
+      {{range $p.NewsArticles}}
+      <li class="news-item">
+        <div class="news-item-header">
+          <span class="news-item-title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></span>
+          <span class="news-item-meta">{{if .Source}}<span class="news-item-source">{{.Source}}</span>{{end}}{{if .Age}} · <span class="news-item-age">{{.Age}}</span>{{end}}</span>
+        </div>
+      </li>
+      {{end}}
+    </ul>
+    <button class="news-see-more" onclick="loadMoreNews(this)">
+      <span class="material-icons-round" style="font-size:14px;vertical-align:middle;">add</span> See more
+    </button>
+  </div>
+  {{end}}
   <div class="pair-explain" id="explain-{{$i}}">
     <div class="pair-explain-inner">
       <div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>{{$p.Explanation}}</div>
@@ -1446,6 +1564,49 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     var open = el.classList.toggle("is-open");
     btn.classList.toggle("is-open", open);
   };
+
+  window.loadMoreNews = function(btn) {
+    var container = btn.closest(".pair-news");
+    if (!container) return;
+    var query = container.getAttribute("data-news-query");
+    if (!query) return;
+    btn.disabled = true;
+    btn.classList.add("is-loading");
+    btn.querySelector(".material-icons-round").textContent = "sync";
+    btn.childNodes[btn.childNodes.length - 1].textContent = " Loading...";
+
+    fetch("/news?q=" + encodeURIComponent(query))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var list = container.querySelector(".news-list");
+        if (!list) return;
+        list.innerHTML = "";
+        var articles = data.articles || [];
+        if (articles.length === 0) {
+          list.innerHTML = '<li class="news-item" style="color:var(--text-muted);font-size:0.73rem;">No articles found</li>';
+        }
+        for (var i = 0; i < articles.length; i++) {
+          var a = articles[i];
+          var li = document.createElement("li");
+          li.className = "news-item";
+          li.innerHTML = '<div class="news-item-header">' +
+            '<span class="news-item-title"><a href="' + escAttr(a.url) + '" target="_blank" rel="noopener">' + escTxt(a.title) + '</a></span>' +
+            '<span class="news-item-meta">' + (a.source ? '<span class="news-item-source">' + escTxt(a.source) + '</span>' : '') + (a.age ? ' \u00b7 <span class="news-item-age">' + escTxt(a.age) + '</span>' : '') + '</span>' +
+            '</div>';
+          list.appendChild(li);
+        }
+        btn.remove();
+      })
+      .catch(function() {
+        btn.disabled = false;
+        btn.classList.remove("is-loading");
+        btn.querySelector(".material-icons-round").textContent = "add";
+        btn.childNodes[btn.childNodes.length - 1].textContent = " See more";
+      });
+  };
+
+  function escTxt(s) { var d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
+  function escAttr(s) { return (s || "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
   var modal = document.getElementById("marketDetailModal");
   if (!modal) return;
@@ -1820,6 +1981,31 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
     '</div>';
   }
 
+  function renderNewsArticle(a) {
+    return '<li class="news-item"><div class="news-item-header">' +
+      '<span class="news-item-title"><a href="' + escHtml(a.url) + '" target="_blank" rel="noopener">' + escHtml(a.title) + '</a></span>' +
+      '<span class="news-item-meta">' + (a.source ? '<span class="news-item-source">' + escHtml(a.source) + '</span>' : '') + (a.age ? ' · <span class="news-item-age">' + escHtml(a.age) + '</span>' : '') + '</span>' +
+      '</div></li>';
+  }
+
+  function renderNewsSection(p) {
+    if (!p.news_query) return '';
+    var firstArticle = '';
+    if (p.news_articles && p.news_articles.length > 0) {
+      firstArticle = renderNewsArticle(p.news_articles[0]);
+    }
+    return '<div class="pair-news" data-news-query="' + escHtml(p.news_query) + '">' +
+      '<div class="pair-news-header">' +
+        '<span class="material-icons-round pair-news-icon">newspaper</span>' +
+        '<span class="pair-news-title">Related News</span>' +
+      '</div>' +
+      '<ul class="news-list">' + firstArticle + '</ul>' +
+      '<button class="news-see-more" onclick="loadMoreNews(this)">' +
+        '<span class="material-icons-round" style="font-size:14px;vertical-align:middle;">add</span> See more' +
+      '</button>' +
+    '</div>';
+  }
+
   function renderPairCard(p, idx) {
     return '<div class="pair-card ' + cardClass(p.confidence) + '" id="pair-' + idx + '" style="opacity:0;transform:translateY(16px);transition:opacity 400ms ease,transform 400ms ease;">' +
       '<div class="pair-head">' +
@@ -1847,6 +2033,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; back
         renderMktCol(p.market_a) +
         renderMktCol(p.market_b) +
       '</div>' +
+      renderNewsSection(p) +
       '<div class="pair-explain" id="explain-s' + idx + '">' +
         '<div class="pair-explain-inner">' +
           '<div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>' + escHtml(p.explanation) + '</div>' +

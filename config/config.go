@@ -44,6 +44,10 @@ type Config struct {
 	PolymarketSearchAPI string
 	KalshiSearchAPI     string
 
+	// News integration
+	NewsEnabled     bool
+	NewsMaxArticles int
+
 	// Fetch strategy: "category", "search", or "broad"
 	FetchStrategy string
 	// Markets per category when using category-bucketed fetch (default 50)
@@ -75,6 +79,9 @@ func Load() (*Config, error) {
 
 		PolymarketSearchAPI: envString("POLYMARKET_SEARCH_API", "https://gamma-api.polymarket.com/public-search"),
 		KalshiSearchAPI:     envString("KALSHI_SEARCH_API", "https://api.elections.kalshi.com/v1/search/series"),
+
+		NewsEnabled:     envBool("NEWS_ENABLED", false),
+		NewsMaxArticles: envInt("NEWS_MAX_ARTICLES", 5),
 
 		FetchStrategy:      envString("FETCH_STRATEGY", "category"),
 		MarketsPerCategory: envInt("MARKETS_PER_CATEGORY", 50),
@@ -114,6 +121,13 @@ func envInt(key string, def int) int {
 		if i, err := strconv.Atoi(v); err == nil {
 			return i
 		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return v == "true" || v == "1" || v == "yes"
 	}
 	return def
 }
