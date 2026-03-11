@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Equinox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<div class="header">
+  <div class="header-inner">
+    <a href="/" class="logo">
+      <div class="logo-icon">E</div>
+      <div class="logo-text">Equinox</div>
+    </a>
+    {{if .HasQuery}}
+    <form class="search-form" method="GET" action="/">
+      <input class="search-input" type="text" name="q" value="{{.SearchQuery}}" placeholder="Search markets across venues..." autofocus>
+      <button class="search-btn" type="submit">Search</button>
+    </form>
+    {{end}}
+  </div>
+</div>
+
+<div class="content">
+
+{{if not .HasQuery}}
+<!-- Hero / landing -->
+<div class="hero">
+  <div class="hero-title">Cross-venue market search</div>
+  <div class="hero-sub">Find equivalent prediction markets on Polymarket and Kalshi side by side, with routing recommendations.</div>
+  <form class="hero-form" method="GET" action="/">
+    <input class="hero-input" type="text" name="q" placeholder="e.g. 2026 FIFA World Cup, Bitcoin, Fed rate..." autofocus>
+    <button class="hero-btn" type="submit">Search</button>
+  </form>
+  <div class="hero-hints">
+    <a class="hero-hint" href="/?q=2026+FIFA+World+Cup">2026 FIFA World Cup</a>
+    <a class="hero-hint" href="/?q=2028+US+Presidential+Election">2028 US Presidential Election</a>
+    <a class="hero-hint" href="/?q=Oscars+2026">Oscars 2026</a>
+    <a class="hero-hint" href="/?q=Bitcoin+price">Bitcoin price</a>
+    <a class="hero-hint" href="/?q=NBA+championship+2026">NBA championship 2026</a>
+  </div>
+</div>
+
+{{else if not .Pairs}}
+<!-- No results -->
+<div class="empty-state">
+  <div class="empty-icon material-icons-round">search_off</div>
+  <div class="empty-title">No equivalent pairs found</div>
+  {{if .DiagnosisMessage}}
+  <div class="diagnosis">
+    <div class="diagnosis-box">
+      <div class="diagnosis-label">Why no matches?</div>
+      <div class="diagnosis-msg">{{.DiagnosisMessage}}</div>
+    </div>
+  </div>
+  {{else}}
+  <div class="empty-sub">Try a different search query, or adjust MATCH_THRESHOLD / MAX_DATE_DELTA_DAYS to widen the match window.</div>
+  {{end}}
+</div>
+
+{{else}}
+<!-- Results -->
+<div class="results-header">
+  <div class="results-title">Results for <strong>"{{.SearchQuery}}"</strong></div>
+  {{range $venue, $count := .VenueCounts}}
+  <span class="result-badge badge-venue">{{$venue}}: {{$count}}</span>
+  {{end}}
+  {{if .MatchCount}}<span class="result-badge badge-match">{{.MatchCount}} matched</span>{{end}}
+  {{if .ProbableCount}}<span class="result-badge badge-probable">{{.ProbableCount}} probable</span>{{end}}
+</div>
+
+{{range $i, $p := .Pairs}}
+<div class="pair-card {{cardClass $p.Confidence}}" id="pair-{{$i}}">
+  <div class="pair-head">
+    <div class="pair-index">{{inc $i}}</div>
+    <div class="conf-badge {{confClass $p.Confidence}}">
+      <span class="material-icons-round">{{confIcon $p.Confidence}}</span>
+      {{$p.Confidence}}
+    </div>
+    <div class="head-separator"></div>
+    <div class="score-pills">
+      <div class="score-pill">Fuzzy <div class="bar-mini"><div class="bar-mini-fill" style="width:{{scoreWidth $p.FuzzyScore}}"></div></div> <strong>{{score $p.FuzzyScore}}</strong></div>
+      <div class="score-pill">Composite <div class="bar-mini"><div class="bar-mini-fill" style="width:{{scoreWidth $p.CompositeScore}}"></div></div> <strong>{{score $p.CompositeScore}}</strong></div>
+    </div>
+    <div class="head-spacer"></div>
+    <div class="route-chip">
+      <span class="material-icons-round">arrow_forward</span>
+      <span class="rv {{venueClass $p.SelectedVenue}}">{{$p.SelectedVenue}}</span>
+    </div>
+    <button class="expand-btn" onclick="toggleExplain(this, 'explain-{{$i}}')">
+      <span class="material-icons-round">expand_more</span>
+    </button>
+  </div>
+  <div class="pair-body">
+    <div class="market-col clickable-market"
+         data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-title="{{$p.MarketA.Title}}"
+         data-description="{{$p.MarketA.Description}}" data-category="{{$p.MarketA.Category}}" data-tags="{{$p.MarketA.Tags}}"
+         data-status="{{$p.MarketA.Status}}" data-yes="{{printf "%.6f" $p.MarketA.YesPrice}}"
+         data-token-id="{{$p.MarketA.VenueYesTokenID}}"
+         data-liquidity="{{printf "%.2f" $p.MarketA.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketA.Spread}}"
+         data-resolution-date="{{$p.MarketA.ResolutionDate}}" data-created-at="{{$p.MarketA.CreatedAt}}" data-updated-at="{{$p.MarketA.UpdatedAt}}"
+         data-volume24h="{{printf "%.2f" $p.MarketA.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketA.OpenInterest}}"
+         data-resolution-criteria="{{$p.MarketA.ResolutionRaw}}" data-venue-link="{{$p.MarketA.VenueLink}}"
+         data-venue-search-link="{{$p.MarketA.VenueSearchLink}}" data-venue-search-link-alt="{{$p.MarketA.VenueSearchLinkAlt}}"
+         data-image-url="{{$p.MarketA.ImageURL}}"
+         data-payload="{{$p.MarketA.RawPayloadB64}}">
+      <div class="mkt-header">
+        {{if $p.MarketA.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketA.ImageURL}}" alt="" loading="lazy">{{end}}
+        <div class="venue-dot vd-{{$p.MarketA.Venue}}">{{venueIcon $p.MarketA.Venue}}</div>
+        <div class="mkt-title">{{$p.MarketA.Title}}</div>
+      </div>
+      <div class="mkt-stats">
+        <span class="mkt-price" data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-token-id="{{$p.MarketA.VenueYesTokenID}}">{{pct $p.MarketA.YesPrice}}</span>
+        <span class="mkt-stat">Liq <span>{{usd $p.MarketA.Liquidity}}</span></span>
+        <span class="mkt-stat">Spread <span>{{if $p.MarketA.Spread}}{{pct $p.MarketA.Spread}}{{else}}--{{end}}</span></span>
+        {{if $p.MarketA.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketA.ResolutionDate}}</span></span>{{end}}
+        {{if bigVol $p.MarketA.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketA.Volume24h}}</span></span>{{end}}
+      </div>
+    </div>
+    <div class="market-col clickable-market"
+         data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-title="{{$p.MarketB.Title}}"
+         data-description="{{$p.MarketB.Description}}" data-category="{{$p.MarketB.Category}}" data-tags="{{$p.MarketB.Tags}}"
+         data-status="{{$p.MarketB.Status}}" data-yes="{{printf "%.6f" $p.MarketB.YesPrice}}"
+         data-token-id="{{$p.MarketB.VenueYesTokenID}}"
+         data-liquidity="{{printf "%.2f" $p.MarketB.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketB.Spread}}"
+         data-resolution-date="{{$p.MarketB.ResolutionDate}}" data-created-at="{{$p.MarketB.CreatedAt}}" data-updated-at="{{$p.MarketB.UpdatedAt}}"
+         data-volume24h="{{printf "%.2f" $p.MarketB.Volume24h}}" data-open-interest="{{printf "%.2f" $p.MarketB.OpenInterest}}"
+         data-resolution-criteria="{{$p.MarketB.ResolutionRaw}}" data-venue-link="{{$p.MarketB.VenueLink}}"
+         data-venue-search-link="{{$p.MarketB.VenueSearchLink}}" data-venue-search-link-alt="{{$p.MarketB.VenueSearchLinkAlt}}"
+         data-image-url="{{$p.MarketB.ImageURL}}"
+         data-payload="{{$p.MarketB.RawPayloadB64}}">
+      <div class="mkt-header">
+        {{if $p.MarketB.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketB.ImageURL}}" alt="" loading="lazy">{{end}}
+        <div class="venue-dot vd-{{$p.MarketB.Venue}}">{{venueIcon $p.MarketB.Venue}}</div>
+        <div class="mkt-title">{{$p.MarketB.Title}}</div>
+      </div>
+      <div class="mkt-stats">
+        <span class="mkt-price" data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-token-id="{{$p.MarketB.VenueYesTokenID}}">{{pct $p.MarketB.YesPrice}}</span>
+        <span class="mkt-stat">Liq <span>{{usd $p.MarketB.Liquidity}}</span></span>
+        <span class="mkt-stat">Spread <span>{{if $p.MarketB.Spread}}{{pct $p.MarketB.Spread}}{{else}}--{{end}}</span></span>
+        {{if $p.MarketB.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketB.ResolutionDate}}</span></span>{{end}}
+        {{if bigVol $p.MarketB.Volume24h}}<span class="mkt-stat">24h <span>{{usd $p.MarketB.Volume24h}}</span></span>{{end}}
+      </div>
+    </div>
+  </div>
+  {{if $p.NewsQuery}}
+  <div class="pair-news" data-news-query="{{$p.NewsQuery}}">
+    <div class="pair-news-header">
+      <span class="material-icons-round pair-news-icon">newspaper</span>
+      <span class="pair-news-title">Related News</span>
+    </div>
+    <ul class="news-list">
+      {{if $p.NewsArticles}}{{range $p.NewsArticles}}
+      <li class="news-item">
+        <div class="news-item-header">
+          <span class="news-item-title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></span>
+          <span class="news-item-meta">{{if .Source}}<span class="news-item-source">{{.Source}}</span>{{end}}{{if .Age}} · <span class="news-item-age">{{.Age}}</span>{{end}}</span>
+        </div>
+      </li>
+      {{end}}{{else}}
+      <li class="news-item" style="color:var(--text-muted);font-size:0.73rem;">Loading news...</li>
+      {{end}}
+    </ul>
+    <button class="news-see-more" onclick="loadMoreNews(this)">
+      <span class="material-icons-round" style="font-size:14px;vertical-align:middle;">add</span> See more
+    </button>
+  </div>
+  {{end}}
+  <div class="pair-explain" id="explain-{{$i}}">
+    <div class="pair-explain-inner">
+      <div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>{{$p.Explanation}}</div>
+      <div class="pair-explain-section"><div class="pair-explain-label">Routing decision</div>{{$p.RoutingReason}}</div>
+    </div>
+  </div>
+</div>
+{{end}}
+{{end}}
+
+</div>
+
+<!-- Detail Modal -->
+<div id="marketDetailModal" class="modal-overlay" aria-hidden="true">
+  <div class="modal-bg" onclick="closeMarketModal()"></div>
+  <div class="modal-container">
+    <div id="mdImageBanner" style="display:none;height:120px;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;">
+      <img id="mdImage" src="" alt="" style="width:100%;height:100%;object-fit:cover;">
+    </div>
+    <div class="modal-header">
+      <div class="modal-header-title" id="mdTitle"></div>
+      <button class="modal-close-btn" onclick="closeMarketModal()">
+        <span class="material-icons-round">close</span>
+      </button>
+    </div>
+    <div class="modal-scroll">
+      <div class="modal-section">
+        <div class="modal-section-title">Market Details</div>
+        <div class="modal-grid">
+          <div class="modal-field"><div class="modal-field-label">Venue</div><div class="modal-field-value" id="mdVenue"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Market ID</div><div class="modal-field-value" id="mdMarketId"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Status</div><div class="modal-field-value" id="mdStatus"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Category</div><div class="modal-field-value" id="mdCategory"></div></div>
+          <div class="modal-field full"><div class="modal-field-label">Description</div><div class="modal-field-value" id="mdDescription"></div></div>
+          <div class="modal-field full"><div class="modal-field-label">Tags</div><div class="modal-field-value" id="mdTags"></div></div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Pricing & Liquidity</div>
+        <div class="modal-grid">
+          <div class="modal-field"><div class="modal-field-label">Yes Price</div><div class="modal-field-value" id="mdYes"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Spread</div><div class="modal-field-value" id="mdSpread"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Liquidity</div><div class="modal-field-value" id="mdLiquidity"></div></div>
+          <div class="modal-field"><div class="modal-field-label">24h Volume</div><div class="modal-field-value" id="mdVolume"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Open Interest</div><div class="modal-field-value" id="mdOpenInterest"></div></div>
+          <div class="modal-field"><div class="modal-field-label">Resolution Date</div><div class="modal-field-value" id="mdResolutionDate"></div></div>
+        </div>
+      </div>
+      <div class="modal-section" id="mdLiveSection" style="display:none;">
+        <div class="modal-section-title">Live Price</div>
+        <div class="live-panel">
+          <div class="live-head">
+            <div class="live-now" id="mdLiveNow">--</div>
+            <div class="live-delta flat" id="mdLiveDelta">--</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Resolution</div>
+        <div class="modal-grid">
+          <div class="modal-field full"><div class="modal-field-label">Resolution Criteria</div><div class="modal-field-value" id="mdResolutionCriteria"></div></div>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Raw Venue Payload</div>
+        <pre class="raw-json" id="mdRawPayload"></pre>
+      </div>
+      <div class="modal-links" id="mdLinks"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
