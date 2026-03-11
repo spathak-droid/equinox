@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -102,9 +103,8 @@ type MarketView struct {
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	// .env is optional — Railway (and other cloud hosts) inject vars directly.
+	_ = godotenv.Load()
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
@@ -198,7 +198,12 @@ func main() {
 		emit(progressEvent{Type: "done"})
 	})
 
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	fmt.Printf("[equinox-ui] Listening on :%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 // runSearchPipelineWithProgress searches both venues for a query, cross-matches,

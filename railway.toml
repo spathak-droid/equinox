@@ -1,0 +1,8 @@
+[build]
+buildCommand = "go build -o bin/equinox-ui ./cmd/equinox-ui"
+
+[deploy]
+startCommand = "./bin/equinox-ui"
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
