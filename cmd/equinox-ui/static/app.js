@@ -83,10 +83,10 @@
   if (!modal) return;
 
   var fields = {};
-  ["mdTitle","mdVenue","mdMarketId","mdStatus","mdDescription","mdTags",
-   "mdCategory","mdResolutionDate","mdResolutionCriteria","mdYes",
+  ["mdTitle","mdVenue","mdVenueBadge","mdMarketId","mdStatus","mdDescription","mdTags",
+   "mdCategory","mdResolutionDate","mdResolutionCriteria","mdYes","mdNo",
    "mdLiquidity","mdSpread","mdVolume",
-   "mdOpenInterest","mdRawPayload","mdLinks","mdImage","mdImageBanner",
+   "mdOpenInterest","mdRawPayload","mdLinks",
    "mdLiveNow","mdLiveDelta","mdLiveSection"].forEach(function(id) {
     fields[id] = document.getElementById(id);
   });
@@ -118,10 +118,29 @@
     }
   }
 
+  function fmtPctModal(v) {
+    var n = parseFloat(v);
+    if (!isFinite(n)) return "--";
+    return (n * 100).toFixed(1) + "%";
+  }
+  function fmtUsdModal(v) {
+    var n = parseFloat(v);
+    if (!isFinite(n) || n === 0) return "--";
+    if (n >= 1e6) return "$" + (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+    return "$" + n.toFixed(0);
+  }
+  function venueDisplayName(v) {
+    if (v === "polymarket") return "Polymarket";
+    if (v === "kalshi") return "Kalshi";
+    return v || "--";
+  }
+
   window.showMarketModal = function(card) {
     var d = card.dataset;
+    var venueName = venueDisplayName(d.venue);
     fields.mdTitle.textContent = safe(d.title);
-    fields.mdVenue.textContent = safe(d.venue);
+    fields.mdVenue.textContent = venueName;
     fields.mdMarketId.textContent = safe(d.marketId);
     fields.mdStatus.textContent = safe(d.status);
     fields.mdDescription.textContent = safe(d.description);
@@ -129,11 +148,17 @@
     fields.mdCategory.textContent = safe(d.category);
     fields.mdResolutionDate.textContent = safe(d.resolutionDate);
     fields.mdResolutionCriteria.textContent = safe(d.resolutionCriteria);
-    fields.mdVolume.textContent = safe(d.volume24h);
-    fields.mdOpenInterest.textContent = safe(d.openInterest);
-    fields.mdYes.textContent = safe(d.yes);
-    fields.mdLiquidity.textContent = safe(d.liquidity);
-    fields.mdSpread.textContent = safe(d.spread);
+    fields.mdVolume.textContent = fmtUsdModal(d.volume24h);
+    fields.mdOpenInterest.textContent = fmtUsdModal(d.openInterest);
+    fields.mdYes.textContent = fmtPctModal(d.yes);
+    fields.mdNo.textContent = fmtPctModal(d.no);
+    fields.mdLiquidity.textContent = fmtUsdModal(d.liquidity);
+    fields.mdSpread.textContent = fmtPctModal(d.spread);
+
+    // Venue badge
+    var badge = fields.mdVenueBadge;
+    badge.textContent = venueName;
+    badge.className = "modal-venue-badge vb-" + (d.venue || "").toLowerCase();
 
     activeLive.venue = String(d.venue || "").toLowerCase();
     activeLive.marketId = String(d.marketId || "");
@@ -142,15 +167,6 @@
       window.__livePriceState.publish(activeLive.venue, activeLive.marketId, initYes);
     }
     renderLivePrice(activeLive.venue, activeLive.marketId);
-
-    var imgUrl = d.imageUrl || "";
-    if (imgUrl) {
-      fields.mdImage.src = imgUrl;
-      fields.mdImageBanner.style.display = "block";
-    } else {
-      fields.mdImage.src = "";
-      fields.mdImageBanner.style.display = "none";
-    }
 
     var b64 = d.payload || "";
     if (b64) {
@@ -165,7 +181,7 @@
     links.innerHTML = "";
     var venueLink = safe(d.venueLink);
     if (venueLink && venueLink !== "--") {
-      links.innerHTML += '<a class="modal-link" href="' + venueLink + '" target="_blank"><span class="material-icons-round">open_in_new</span>Open on ' + safe(d.venue) + '</a>';
+      links.innerHTML += '<a class="modal-link" href="' + venueLink + '" target="_blank" rel="noopener"><span class="material-icons-round">open_in_new</span>' + venueName + '</a>';
     }
 
     modal.classList.add("is-open");
@@ -387,6 +403,31 @@
   var content = document.querySelector(".content");
 
   function showStreamUI(q) {
+    // Ensure header search form is visible (it's absent on the landing page)
+    var headerInner = document.querySelector(".header-inner");
+    if (headerInner && !headerInner.querySelector(".search-form")) {
+      var form = document.createElement("form");
+      form.className = "search-form";
+      form.method = "GET";
+      form.action = "/";
+      form.innerHTML =
+        '<input class="search-input" type="text" name="q" value="' + escHtml(q) + '" placeholder="Search markets across venues..." autofocus>' +
+        '<button class="search-btn" type="submit">Search</button>';
+      headerInner.appendChild(form);
+      form.addEventListener("submit", function(e) {
+        var input = form.querySelector("[name=q]");
+        if (!input) return;
+        var val = input.value.trim();
+        if (!val) return;
+        e.preventDefault();
+        startStreamSearch(val, false);
+      });
+    } else if (headerInner) {
+      // Update existing search input value
+      var existing = headerInner.querySelector(".search-input");
+      if (existing) existing.value = q;
+    }
+
     content.innerHTML =
       '<div class="results-header" id="streamHeader">' +
         '<div class="results-title"><span class="material-icons-round" style="font-size:14px;vertical-align:middle;animation:loaderSpin 0.9s linear infinite;margin-right:4px;">sync</span> Searching for <strong>"' + escHtml(q) + '"</strong></div>' +
@@ -449,6 +490,7 @@
       ' data-tags="' + escHtml(m.tags) + '"' +
       ' data-status="' + escHtml(m.status) + '"' +
       ' data-yes="' + (m.yes_price || 0).toFixed(6) + '"' +
+      ' data-no="' + (m.no_price || 0).toFixed(6) + '"' +
       ' data-token-id="' + escHtml(m.venue_yes_token_id || "") + '"' +
       ' data-liquidity="' + (m.liquidity || 0).toFixed(2) + '"' +
       ' data-spread="' + (m.spread || 0).toFixed(6) + '"' +
@@ -474,7 +516,7 @@
         '<div class="mkt-title">' + escHtml(m.title) + '</div>' +
       '</div>' +
       '<div class="mkt-stats">' +
-        '<span class="mkt-price" data-venue="' + escHtml(m.venue) + '" data-market-id="' + escHtml(m.venue_market_id) + '" data-token-id="' + escHtml(m.venue_yes_token_id || "") + '">' + fmtPct(m.yes_price || 0) + '</span>' +
+        '<span class="mkt-price" data-venue="' + escHtml(m.venue) + '" data-market-id="' + escHtml(m.venue_market_id) + '" data-token-id="' + escHtml(m.venue_yes_token_id || "") + '"><span class="price-yes">' + fmtPct(m.yes_price || 0) + '</span> <span class="price-no">' + fmtPct(m.no_price || 0) + '</span></span>' +
         '<span class="mkt-stat">Liq <span>' + fmtUsd(m.liquidity) + '</span></span>' +
         '<span class="mkt-stat">Spread <span>' + (m.spread ? fmtPct(m.spread) : "--") + '</span></span>' +
         (m.resolution_date ? '<span class="mkt-stat">Res <span>' + escHtml(m.resolution_date) + '</span></span>' : '') +
@@ -540,7 +582,28 @@
       '<div class="pair-explain" id="explain-s' + idx + '">' +
         '<div class="pair-explain-inner">' +
           '<div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>' + escHtml(p.explanation) + '</div>' +
-          '<div class="pair-explain-section"><div class="pair-explain-label">Routing decision</div>' + escHtml(p.routing_reason) + '</div>' +
+          '<div class="pair-explain-section">' +
+            '<div class="pair-explain-label">Routing decision</div>' +
+            '<div class="route-form" data-pair-idx="s' + idx + '"' +
+              ' data-yes-a="' + (p.market_a.yes_price||0).toFixed(6) + '" data-no-a="' + (p.market_a.no_price||0).toFixed(6) + '"' +
+              ' data-liq-a="' + (p.market_a.liquidity||0).toFixed(2) + '" data-spread-a="' + (p.market_a.spread||0).toFixed(6) + '"' +
+              ' data-venue-a="' + escHtml(p.market_a.venue) + '"' +
+              ' data-yes-b="' + (p.market_b.yes_price||0).toFixed(6) + '" data-no-b="' + (p.market_b.no_price||0).toFixed(6) + '"' +
+              ' data-liq-b="' + (p.market_b.liquidity||0).toFixed(2) + '" data-spread-b="' + (p.market_b.spread||0).toFixed(6) + '"' +
+              ' data-venue-b="' + escHtml(p.market_b.venue) + '">' +
+              '<div class="route-form-row">' +
+                '<label class="route-label">Side</label>' +
+                '<div class="route-toggle">' +
+                  '<button class="route-side-btn active" data-side="YES" onclick="setRouteSide(this,\'YES\')">YES</button>' +
+                  '<button class="route-side-btn" data-side="NO" onclick="setRouteSide(this,\'NO\')">NO</button>' +
+                '</div>' +
+                '<label class="route-label">Size</label>' +
+                '<div class="route-input-wrap"><span class="route-input-prefix">$</span><input type="number" class="route-size-input" value="1000" min="1" step="100" onchange="recalcRoute(this)"></div>' +
+                '<button class="route-calc-btn" onclick="recalcRoute(this)"><span class="material-icons-round" style="font-size:14px">refresh</span> Calculate</button>' +
+              '</div>' +
+            '</div>' +
+            '<div class="route-output" id="route-out-s' + idx + '"></div>' +
+          '</div>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -629,6 +692,9 @@
           var card = div.firstChild;
           pairsContainer.appendChild(card);
           bindClickableMarkets(card);
+          // Trigger initial route calculation for streamed pair
+          var calcBtn = card.querySelector(".route-calc-btn");
+          if (calcBtn) window.recalcRoute(calcBtn);
           requestAnimationFrame(function() {
             card.style.opacity = "1";
             card.style.transform = "translateY(0)";
@@ -695,5 +761,139 @@
       if (q) startStreamSearch(q, false);
     });
   });
+
+  // ─── Route form: client-side routing calculation ───────────────────────
+
+  window.setRouteSide = function(btn, side) {
+    var toggle = btn.parentElement;
+    toggle.querySelectorAll(".route-side-btn").forEach(function(b) { b.classList.remove("active"); });
+    btn.classList.add("active");
+    recalcRoute(btn);
+  };
+
+  window.recalcRoute = function(el) {
+    var form = el.closest(".route-form");
+    if (!form) return;
+    var idx = form.dataset.pairIdx;
+    var output = document.getElementById("route-out-" + idx);
+    if (!output) return;
+
+    var side = "YES";
+    var activeBtn = form.querySelector(".route-side-btn.active");
+    if (activeBtn) side = activeBtn.dataset.side;
+
+    var sizeInput = form.querySelector(".route-size-input");
+    var size = parseFloat(sizeInput.value) || 1000;
+
+    var d = form.dataset;
+    var venueA = d.venueA || "A";
+    var venueB = d.venueB || "B";
+    var yesA = parseFloat(d.yesA) || 0;
+    var yesB = parseFloat(d.yesB) || 0;
+    var liqA = parseFloat(d.liqA) || 0;
+    var liqB = parseFloat(d.liqB) || 0;
+    var spreadA = parseFloat(d.spreadA) || 0;
+    var spreadB = parseFloat(d.spreadB) || 0;
+
+    var PW = 0.60, LW = 0.30, SW = 0.10;
+
+    function scoreVenue(yes, liq, spread) {
+      var price = (side === "YES") ? (1.0 - yes) : yes;
+      var liquidity = Math.tanh(liq / size);
+      var sp = (spread === 0) ? 0.5 : (1.0 - Math.min(spread / 0.20, 1.0));
+      return { price: price, liquidity: liquidity, spread: sp, total: PW*price + LW*liquidity + SW*sp };
+    }
+
+    var sA = scoreVenue(yesA, liqA, spreadA);
+    var sB = scoreVenue(yesB, liqB, spreadB);
+    var aWins = sA.total >= sB.total;
+    var winner = aWins ? venueA : venueB;
+    var loseVenue = aWins ? venueB : venueA;
+    var winScore = aWins ? sA : sB;
+    var loseScore = aWins ? sB : sA;
+    var winYes = aWins ? yesA : yesB;
+    var winLiq = aWins ? liqA : liqB;
+    var winSpread = aWins ? spreadA : spreadB;
+    var loseLiq = aWins ? liqB : liqA;
+    var loseSpread = aWins ? spreadB : spreadA;
+
+    var costWin = (side === "YES") ? winYes : (1 - winYes);
+    var costLose = (side === "YES") ? (aWins ? yesB : yesA) : (1 - (aWins ? yesB : yesA));
+    var sharesWin = (costWin > 0) ? (size / costWin) : 0;
+    var payout = sharesWin * 1.0;
+    var profit = payout - size;
+    var ret = (size > 0) ? ((profit / size) * 100) : 0;
+
+    function fmtBps(s) { return (s * 10000).toFixed(0); }
+    function fmtK(n) { if (n >= 1e6) return "$" + (n/1e6).toFixed(1) + "M"; if (n >= 1e3) return "$" + (n/1e3).toFixed(1) + "K"; return "$" + Math.round(n); }
+
+    function venueCard(name, s, yes, liq, spread, isWinner) {
+      var cost = (side === "YES") ? yes : (1 - yes);
+      var shares = (cost > 0) ? (size / cost) : 0;
+      var cls = isWinner ? "rv-card rv-winner" : "rv-card";
+      var badge = isWinner ? '<span class="rv-badge">BEST</span>' : '';
+      var liqWarn = (liq < size) ? ' <span class="rv-warn">(' + Math.round((liq/size)*100) + '% fill)</span>' : '';
+      var spreadLabel = "";
+      if (spread === 0) { spreadLabel = "N/A"; }
+      else { spreadLabel = fmtBps(spread) + " bps"; }
+      return '<div class="' + cls + '">' +
+        '<div class="rv-head"><span class="rv-venue">' + name + '</span>' + badge + '<span class="rv-score">' + s.total.toFixed(3) + '</span></div>' +
+        '<div class="rv-stats">' +
+          '<div class="rv-stat"><div class="rv-stat-label">Price</div><div class="rv-stat-val">$' + cost.toFixed(4) + '</div></div>' +
+          '<div class="rv-stat"><div class="rv-stat-label">Shares</div><div class="rv-stat-val">~' + Math.round(shares).toLocaleString() + '</div></div>' +
+          '<div class="rv-stat"><div class="rv-stat-label">Liquidity</div><div class="rv-stat-val">' + fmtK(liq) + liqWarn + '</div></div>' +
+          '<div class="rv-stat"><div class="rv-stat-label">Spread</div><div class="rv-stat-val">' + spreadLabel + '</div></div>' +
+        '</div>' +
+      '</div>';
+    }
+
+    // Reasons
+    var reasons = [];
+    if (winScore.price > loseScore.price && costLose > 0) {
+      var pctDiff = ((costLose - costWin) / costLose * 100).toFixed(1);
+      reasons.push("Better price: $" + costWin.toFixed(4) + " vs $" + costLose.toFixed(4) + " on " + loseVenue + " (" + pctDiff + "% cheaper)");
+    }
+    if (winLiq > loseLiq * 2) {
+      reasons.push("Much deeper liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + loseVenue);
+    } else if (winLiq > loseLiq) {
+      reasons.push("More liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + loseVenue);
+    }
+    if (winScore.spread > loseScore.spread && winSpread > 0) {
+      reasons.push("Tighter spread: " + fmtBps(winSpread) + " bps vs " + fmtBps(loseSpread) + " bps on " + loseVenue);
+    }
+    if (reasons.length === 0) reasons.push("Higher overall weighted score");
+
+    var reasonsHtml = '<ul class="rv-reasons">';
+    for (var i = 0; i < reasons.length; i++) {
+      reasonsHtml += '<li>' + reasons[i] + '</li>';
+    }
+    reasonsHtml += '</ul>';
+
+    var html = '<div class="rv-grid">';
+    if (aWins) {
+      html += venueCard(venueA, sA, yesA, liqA, spreadA, true);
+      html += venueCard(venueB, sB, yesB, liqB, spreadB, false);
+    } else {
+      html += venueCard(venueB, sB, yesB, liqB, spreadB, true);
+      html += venueCard(venueA, sA, yesA, liqA, spreadA, false);
+    }
+    html += '</div>';
+
+    html += '<div class="rv-why"><div class="rv-why-title">Why ' + winner + '?</div>' + reasonsHtml + '</div>';
+
+    html += '<div class="rv-exec">' +
+      '<div class="rv-exec-title">Estimated Execution</div>' +
+      '<div class="rv-exec-grid">' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Venue</span><span class="rv-exec-val">' + winner + '</span></div>' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Side</span><span class="rv-exec-val">BUY ' + side + '</span></div>' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Cost/share</span><span class="rv-exec-val">$' + costWin.toFixed(4) + '</span></div>' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Order size</span><span class="rv-exec-val">' + fmtK(size) + '</span></div>' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Shares</span><span class="rv-exec-val">~' + Math.round(sharesWin).toLocaleString() + '</span></div>' +
+        '<div class="rv-exec-item rv-exec-highlight"><span class="rv-exec-label">If correct</span><span class="rv-exec-val">' + fmtK(payout) + ' payout (' + fmtK(profit) + ' profit, ' + Math.round(ret) + '% return)</span></div>' +
+      '</div>' +
+    '</div>';
+
+    output.innerHTML = html;
+  };
 
 })();

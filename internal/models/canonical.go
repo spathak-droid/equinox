@@ -50,7 +50,6 @@ type CanonicalMarket struct {
 	// --- Human-readable description ---
 	Title           string `json:"title"`
 	Subtitle        string `json:"subtitle,omitempty"`         // specific option within a group: Poly groupItemTitle / Kalshi subtitle
-	NormalizedTitle string `json:"normalized_title,omitempty"` // LLM-normalized canonical form for matching; falls back to Title if unset
 	Description     string `json:"description,omitempty"`
 	Category    string   `json:"category,omitempty"` // Normalized broad category (see NormalizeCategory)
 	Tags        []string `json:"tags,omitempty"`

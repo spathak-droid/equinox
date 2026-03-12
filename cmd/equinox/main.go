@@ -69,20 +69,6 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if strings.ToLower(*mode) == "llm-eval" {
-		llm := matcher.NewLLMMatcher()
-		report, err := matcher.EvaluateLLM(ctx, llm, matcher.DefaultLLMEvalSet())
-		if err != nil {
-			return err
-		}
-		if jsonMode {
-			fmt.Println(string(mustJSON(report)))
-			return nil
-		}
-		printLLMEvalReport(report)
-		return nil
-	}
-
 	norm := normalizer.New(cfg)
 	polyClient := polymarket.New(cfg.HTTPTimeout, cfg.PolymarketSearchAPI, *numMarkets)
 	kalshiClient := kalshi.New(cfg.KalshiAPIKey, cfg.HTTPTimeout, cfg.KalshiSearchAPI, *numMarkets)
@@ -219,30 +205,6 @@ func run() error {
 	}
 
 	return nil
-}
-
-func printLLMEvalReport(report *matcher.LLMEvalReport) {
-	fmt.Printf("[llm-eval] model=%s min_confidence=%.2f total=%d\n",
-		report.Model, report.MinConfidence, report.Total)
-	fmt.Printf("[llm-eval] tp=%d fp=%d tn=%d fn=%d\n",
-		report.TruePositives, report.FalsePositives, report.TrueNegatives, report.FalseNegatives)
-	fmt.Printf("[llm-eval] accuracy=%.3f precision=%.3f recall=%.3f f1=%.3f\n",
-		report.Accuracy, report.Precision, report.Recall, report.F1)
-	for _, r := range report.Results {
-		status := "OK"
-		if r.ExpectMatch != r.PredictedMatch {
-			status = "MISS"
-		}
-		fmt.Printf("  - [%s] %s | expect=%t predicted=%t decision=%s conf=%.2f\n",
-			status, r.Name, r.ExpectMatch, r.PredictedMatch, r.Decision, r.Confidence)
-		if r.Err != "" {
-			fmt.Printf("      error: %s\n", r.Err)
-			continue
-		}
-		if r.Reasoning != "" {
-			fmt.Printf("      reason: %s\n", r.Reasoning)
-		}
-	}
 }
 
 func printPairNews(mn *news.MarketNews) {

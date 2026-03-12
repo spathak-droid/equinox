@@ -42,6 +42,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
@@ -65,7 +66,6 @@ type MatchResult struct {
 
 	// Component scores for transparency
 	FuzzyScore          float64
-	EmbeddingScore      float64 // always -1 (embeddings removed)
 	EventMatchScore     float64 // structured event signature match [0.0, 1.0]
 	EntityOverlapScore  float64 // -1 if not computed
 	DateProximityScore  float64 // -1 if not computed
@@ -196,7 +196,6 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 	result := &MatchResult{
 		MarketA:             a,
 		MarketB:             b,
-		EmbeddingScore:      -1, // embeddings removed
 		EntityOverlapScore:  -1,
 		DateProximityScore:  -1,
 		PriceProximityScore: -1,
@@ -270,6 +269,17 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 		result.Confidence = ConfidenceNoMatch
 		result.EventMatchScore = EventMatchScore(sigA, sigB)
 		result.Explanation = "Semantic gate rejection: specific entities differ with no overlap"
+		return result
+	}
+
+	// Action verb gate: reject when titles share an event but ask different questions
+	// (e.g., "win the 2026 FIFA World Cup" vs "compete in the 2026 FIFA World Cup").
+	if differentActions(a.Title, b.Title) {
+		result.Confidence = ConfidenceNoMatch
+		result.EventMatchScore = EventMatchScore(sigA, sigB)
+		actA := extractAction(strings.ToLower(a.Title))
+		actB := extractAction(strings.ToLower(b.Title))
+		result.Explanation = fmt.Sprintf("Action verb mismatch: %q vs %q", actA, actB)
 		return result
 	}
 

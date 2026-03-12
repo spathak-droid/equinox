@@ -101,7 +101,7 @@
     <div class="market-col clickable-market"
          data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-title="{{$p.MarketA.Title}}"
          data-description="{{$p.MarketA.Description}}" data-category="{{$p.MarketA.Category}}" data-tags="{{$p.MarketA.Tags}}"
-         data-status="{{$p.MarketA.Status}}" data-yes="{{printf "%.6f" $p.MarketA.YesPrice}}"
+         data-status="{{$p.MarketA.Status}}" data-yes="{{printf "%.6f" $p.MarketA.YesPrice}}" data-no="{{printf "%.6f" $p.MarketA.NoPrice}}"
          data-token-id="{{$p.MarketA.VenueYesTokenID}}"
          data-liquidity="{{printf "%.2f" $p.MarketA.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketA.Spread}}"
          data-resolution-date="{{$p.MarketA.ResolutionDate}}" data-created-at="{{$p.MarketA.CreatedAt}}" data-updated-at="{{$p.MarketA.UpdatedAt}}"
@@ -116,7 +116,7 @@
         <div class="mkt-title">{{$p.MarketA.Title}}</div>
       </div>
       <div class="mkt-stats">
-        <span class="mkt-price" data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-token-id="{{$p.MarketA.VenueYesTokenID}}">{{pct $p.MarketA.YesPrice}}</span>
+        <span class="mkt-price" data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-token-id="{{$p.MarketA.VenueYesTokenID}}"><span class="price-yes">{{pct $p.MarketA.YesPrice}}</span> <span class="price-no">{{pct $p.MarketA.NoPrice}}</span></span>
         <span class="mkt-stat">Liq <span>{{usd $p.MarketA.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketA.Spread}}{{pct $p.MarketA.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketA.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketA.ResolutionDate}}</span></span>{{end}}
@@ -126,7 +126,7 @@
     <div class="market-col clickable-market"
          data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-title="{{$p.MarketB.Title}}"
          data-description="{{$p.MarketB.Description}}" data-category="{{$p.MarketB.Category}}" data-tags="{{$p.MarketB.Tags}}"
-         data-status="{{$p.MarketB.Status}}" data-yes="{{printf "%.6f" $p.MarketB.YesPrice}}"
+         data-status="{{$p.MarketB.Status}}" data-yes="{{printf "%.6f" $p.MarketB.YesPrice}}" data-no="{{printf "%.6f" $p.MarketB.NoPrice}}"
          data-token-id="{{$p.MarketB.VenueYesTokenID}}"
          data-liquidity="{{printf "%.2f" $p.MarketB.Liquidity}}" data-spread="{{printf "%.6f" $p.MarketB.Spread}}"
          data-resolution-date="{{$p.MarketB.ResolutionDate}}" data-created-at="{{$p.MarketB.CreatedAt}}" data-updated-at="{{$p.MarketB.UpdatedAt}}"
@@ -141,7 +141,7 @@
         <div class="mkt-title">{{$p.MarketB.Title}}</div>
       </div>
       <div class="mkt-stats">
-        <span class="mkt-price" data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-token-id="{{$p.MarketB.VenueYesTokenID}}">{{pct $p.MarketB.YesPrice}}</span>
+        <span class="mkt-price" data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-token-id="{{$p.MarketB.VenueYesTokenID}}"><span class="price-yes">{{pct $p.MarketB.YesPrice}}</span> <span class="price-no">{{pct $p.MarketB.NoPrice}}</span></span>
         <span class="mkt-stat">Liq <span>{{usd $p.MarketB.Liquidity}}</span></span>
         <span class="mkt-stat">Spread <span>{{if $p.MarketB.Spread}}{{pct $p.MarketB.Spread}}{{else}}--{{end}}</span></span>
         {{if $p.MarketB.ResolutionDate}}<span class="mkt-stat">Res <span>{{$p.MarketB.ResolutionDate}}</span></span>{{end}}
@@ -175,7 +175,34 @@
   <div class="pair-explain" id="explain-{{$i}}">
     <div class="pair-explain-inner">
       <div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>{{$p.Explanation}}</div>
-      <div class="pair-explain-section"><div class="pair-explain-label">Routing decision</div>{{$p.RoutingReason}}</div>
+      <div class="pair-explain-section">
+        <div class="pair-explain-label">Routing decision</div>
+        <div class="route-form" data-pair-idx="{{$i}}"
+             data-yes-a="{{printf "%.6f" $p.MarketA.YesPrice}}" data-no-a="{{printf "%.6f" $p.MarketA.NoPrice}}"
+             data-liq-a="{{printf "%.2f" $p.MarketA.Liquidity}}" data-spread-a="{{printf "%.6f" $p.MarketA.Spread}}"
+             data-venue-a="{{$p.MarketA.Venue}}"
+             data-yes-b="{{printf "%.6f" $p.MarketB.YesPrice}}" data-no-b="{{printf "%.6f" $p.MarketB.NoPrice}}"
+             data-liq-b="{{printf "%.2f" $p.MarketB.Liquidity}}" data-spread-b="{{printf "%.6f" $p.MarketB.Spread}}"
+             data-venue-b="{{$p.MarketB.Venue}}">
+          <div class="route-form-row">
+            <label class="route-label">Side</label>
+            <div class="route-toggle">
+              <button class="route-side-btn active" data-side="YES" onclick="setRouteSide(this,'YES')">YES</button>
+              <button class="route-side-btn" data-side="NO" onclick="setRouteSide(this,'NO')">NO</button>
+            </div>
+            <label class="route-label">Size</label>
+            <div class="route-input-wrap">
+              <span class="route-input-prefix">$</span>
+              <input type="number" class="route-size-input" value="1000" min="1" step="100" onchange="recalcRoute(this)">
+            </div>
+            <button class="route-calc-btn" onclick="recalcRoute(this)">
+              <span class="material-icons-round" style="font-size:14px">refresh</span> Calculate
+            </button>
+          </div>
+        </div>
+        <div class="route-output" id="route-out-{{$i}}"></div>
+        <script>document.addEventListener("DOMContentLoaded",function(){var o=document.getElementById("route-out-{{$i}}");if(o){var f=o.closest(".route-form");if(f){window.recalcRoute(f.querySelector(".route-calc-btn"));}}})</script>
+      </div>
     </div>
   </div>
 </div>
@@ -188,16 +215,31 @@
 <div id="marketDetailModal" class="modal-overlay" aria-hidden="true">
   <div class="modal-bg" onclick="closeMarketModal()"></div>
   <div class="modal-container">
-    <div id="mdImageBanner" style="display:none;height:120px;overflow:hidden;border-radius:var(--radius) var(--radius) 0 0;">
-      <img id="mdImage" src="" alt="" style="width:100%;height:100%;object-fit:cover;">
-    </div>
     <div class="modal-header">
-      <div class="modal-header-title" id="mdTitle"></div>
+      <div class="modal-header-left">
+        <span class="modal-venue-badge" id="mdVenueBadge"></span>
+        <div class="modal-header-title" id="mdTitle"></div>
+        <div class="modal-header-links" id="mdLinks"></div>
+      </div>
       <button class="modal-close-btn" onclick="closeMarketModal()">
         <span class="material-icons-round">close</span>
       </button>
     </div>
     <div class="modal-scroll">
+      <div class="modal-price-hero">
+        <div class="modal-price-card yes">
+          <div class="modal-price-label">Yes</div>
+          <div class="modal-price-value" id="mdYes">--</div>
+        </div>
+        <div class="modal-price-card no">
+          <div class="modal-price-label">No</div>
+          <div class="modal-price-value" id="mdNo">--</div>
+        </div>
+        <div class="modal-price-card neutral">
+          <div class="modal-price-label">Spread</div>
+          <div class="modal-price-value" id="mdSpread">--</div>
+        </div>
+      </div>
       <div class="modal-section">
         <div class="modal-section-title">Market Details</div>
         <div class="modal-grid">
@@ -210,10 +252,8 @@
         </div>
       </div>
       <div class="modal-section">
-        <div class="modal-section-title">Pricing & Liquidity</div>
+        <div class="modal-section-title">Liquidity & Volume</div>
         <div class="modal-grid">
-          <div class="modal-field"><div class="modal-field-label">Yes Price</div><div class="modal-field-value" id="mdYes"></div></div>
-          <div class="modal-field"><div class="modal-field-label">Spread</div><div class="modal-field-value" id="mdSpread"></div></div>
           <div class="modal-field"><div class="modal-field-label">Liquidity</div><div class="modal-field-value" id="mdLiquidity"></div></div>
           <div class="modal-field"><div class="modal-field-label">24h Volume</div><div class="modal-field-value" id="mdVolume"></div></div>
           <div class="modal-field"><div class="modal-field-label">Open Interest</div><div class="modal-field-value" id="mdOpenInterest"></div></div>
@@ -239,7 +279,6 @@
         <div class="modal-section-title">Raw Venue Payload</div>
         <pre class="raw-json" id="mdRawPayload"></pre>
       </div>
-      <div class="modal-links" id="mdLinks"></div>
     </div>
   </div>
 </div>

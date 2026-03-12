@@ -55,7 +55,6 @@ type PairView struct {
 	MarketB        MarketView        `json:"market_b"`
 	Confidence     string            `json:"confidence"`
 	FuzzyScore     float64           `json:"fuzzy_score"`
-	EmbeddingScore float64           `json:"embedding_score"`
 	CompositeScore float64           `json:"composite_score"`
 	Explanation    string            `json:"explanation"`
 	SelectedVenue  string            `json:"selected_venue"`
@@ -76,6 +75,7 @@ type MarketView struct {
 	Tags               string  `json:"tags"`
 	ImageURL           string  `json:"image_url"`
 	YesPrice           float64 `json:"yes_price"`
+	NoPrice            float64 `json:"no_price"`
 	Liquidity          float64 `json:"liquidity"`
 	Spread             float64 `json:"spread"`
 	ResolutionDate     string  `json:"resolution_date"`

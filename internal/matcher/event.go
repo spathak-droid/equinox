@@ -280,6 +280,7 @@ var actionVerbs = []string{
 	"cut", "raise", "elect", "impeach", "resign", "announce",
 	"approve", "ban", "pass", "sign", "launch", "default",
 	"invade", "attack", "print", "close", "open", "trade",
+	"compete", "qualify", "skip", "boycott", "host", "attend",
 }
 
 func extractAction(norm string) string {

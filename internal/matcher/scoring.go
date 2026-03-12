@@ -2,7 +2,6 @@ package matcher
 
 import (
 	"fmt"
-	"math"
 	"strings"
 )
 
@@ -156,6 +155,13 @@ var synonyms = map[string]string{
 	"signed": "sign", "signing": "sign",
 	"launched": "launch", "launching": "launch",
 	"defaulted": "default", "defaulting": "default",
+	"competes": "compete", "competing": "compete", "competed": "compete",
+	"qualifies": "qualify", "qualifying": "qualify", "qualified": "qualify",
+	"skips": "skip", "skipping": "skip", "skipped": "skip",
+	"boycotts": "boycott", "boycotting": "boycott", "boycotted": "boycott",
+	"hosts": "host", "hosting": "host", "hosted": "host",
+	"attends": "attend", "attending": "attend", "attended": "attend",
+	"participates": "compete", "participating": "compete", "participated": "compete",
 	"rates": "rate", "prices": "price", "elections": "election",
 	"above": "reach", "below": "under",
 	"higher": "above", "lower": "below",
@@ -277,6 +283,18 @@ var genericEntityTokens = map[string]bool{
 	"market": true, "price": true, "year": true, "yes": true, "no": true,
 }
 
+// differentActions returns true when both titles contain an action verb
+// and those verbs are different (e.g. "win" vs "compete").
+// Uses extractAction from event.go which handles synonym normalization.
+func differentActions(aTitle, bTitle string) bool {
+	actA := extractAction(strings.ToLower(aTitle))
+	actB := extractAction(strings.ToLower(bTitle))
+	if actA == "" || actB == "" {
+		return false
+	}
+	return actA != actB
+}
+
 // disjointSpecificEntities returns true when both titles contain specific named
 // entities but share none of them after removing generic template tokens.
 // Entity synonyms (e.g. "fed" -> "federal reserve") are resolved before comparison
@@ -315,24 +333,3 @@ func disjointSpecificEntities(aTitle, bTitle string) bool {
 	return true
 }
 
-// cosineSimilarity computes the cosine similarity between two float32 vectors.
-// Retained as a utility for potential future use.
-func cosineSimilarity(a, b []float32) float64 {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0
-	}
-
-	var dot, normA, normB float64
-	for i := range a {
-		fa, fb := float64(a[i]), float64(b[i])
-		dot += fa * fb
-		normA += fa * fa
-		normB += fb * fb
-	}
-
-	denom := math.Sqrt(normA) * math.Sqrt(normB)
-	if denom == 0 {
-		return 0
-	}
-	return dot / denom
-}

@@ -25,8 +25,8 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	if len(pairs) == 0 {
 		rejected := m.TopRejectedPairs(allMarkets, 5)
 		for i, rj := range rejected {
-			fmt.Printf("[equinox-ui] reject #%d score=%.3f fuzzy=%.3f emb=%.3f | A=%q | B=%q | reason=%s\n",
-				i+1, rj.CompositeScore, rj.FuzzyScore, rj.EmbeddingScore,
+			fmt.Printf("[equinox-ui] reject #%d score=%.3f fuzzy=%.3f | A=%q | B=%q | reason=%s\n",
+				i+1, rj.CompositeScore, rj.FuzzyScore,
 				rj.MarketA.Title, rj.MarketB.Title, rj.Explanation)
 		}
 		diagnosisMsg = buildDiagnosis(venueCounts, rejected)
@@ -46,16 +46,11 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 			SizeUSD:    cfg.DefaultOrderSize,
 		}
 		decision := r.Route(order, p)
-		embScore := p.EmbeddingScore
-		if embScore < 0 {
-			embScore = 0
-		}
 		pv := PairView{
 			MarketA:        toMarketView(p.MarketA),
 			MarketB:        toMarketView(p.MarketB),
 			Confidence:     string(p.Confidence),
 			FuzzyScore:     p.FuzzyScore,
-			EmbeddingScore: embScore,
 			CompositeScore: p.CompositeScore,
 			Explanation:    p.Explanation,
 			SelectedVenue:  string(decision.SelectedVenue.VenueID),
@@ -97,16 +92,11 @@ func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResul
 		SizeUSD:    cfg.DefaultOrderSize,
 	}
 	decision := r.Route(order, p)
-	embScore := p.EmbeddingScore
-	if embScore < 0 {
-		embScore = 0
-	}
 	pv := PairView{
 		MarketA:        toMarketView(p.MarketA),
 		MarketB:        toMarketView(p.MarketB),
 		Confidence:     string(p.Confidence),
 		FuzzyScore:     p.FuzzyScore,
-		EmbeddingScore: embScore,
 		CompositeScore: p.CompositeScore,
 		Explanation:    p.Explanation,
 		SelectedVenue:  string(decision.SelectedVenue.VenueID),
@@ -214,6 +204,7 @@ func toMarketView(m *models.CanonicalMarket) MarketView {
 		Tags:               strings.Join(m.Tags, ", "),
 		ImageURL:           m.ImageURL,
 		YesPrice:           m.YesPrice,
+		NoPrice:            m.NoPrice,
 		Liquidity:          m.Liquidity,
 		Spread:             m.Spread,
 		ResolutionDate:     res,

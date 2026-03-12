@@ -214,7 +214,7 @@ func TestCrossPollinateJaccardEmptyInput(t *testing.T) {
 	}
 }
 
-func TestFuzzyFallback(t *testing.T) {
+func TestFindEquivalentPairsFromSearch(t *testing.T) {
 	cfg := &config.Config{
 		MatchThreshold:         0.45,
 		ProbableMatchThreshold: 0.35,
@@ -241,7 +241,7 @@ func TestFuzzyFallback(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	results := m.fuzzyFallback(ctx, searchResults)
+	results := m.FindEquivalentPairsFromSearch(ctx, searchResults, "bitcoin")
 	// Results depend on scoring thresholds, just verify no panic
 	_ = results
 }

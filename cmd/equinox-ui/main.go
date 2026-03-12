@@ -3,7 +3,7 @@
 //
 // Usage:
 //
-//	OPENAI_API_KEY=sk-... go run ./cmd/equinox-ui
+//	go run ./cmd/equinox-ui
 //
 // Then open http://localhost:8080 in your browser.
 package main
