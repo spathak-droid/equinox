@@ -97,42 +97,32 @@ func (m *Matcher) FindEquivalentPairsFromSearch(_ context.Context, searchResults
 	return confirmed
 }
 
-// CrossPollinateJaccard finds cross-venue pairs from broad pools for UI queries.
-// Selection uses full rule-based compare() (semantic signature, hard gates,
-// fuzzy score, date checks), not raw token overlap.
+// CrossPollinateJaccard finds cross-venue pairs using event-level matching.
+// Markets are grouped into events first, then events are matched across venues.
+// Within matched events, child markets are paired by outcome similarity.
 func (m *Matcher) CrossPollinateJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket) []*MatchResult {
 	if len(polyMarkets) == 0 || len(kalshiMarkets) == 0 {
 		return nil
 	}
 
-	// Score all cross-venue candidates, then deduplicate globally by market.
-	// This avoids missing good pairs when a market's local "best" candidate
-	// conflicts with a stronger global pairing.
-	var candidates []*MatchResult
-	for _, poly := range polyMarkets {
-		for _, k := range kalshiMarkets {
-			r := m.compare(poly, k)
-			if r.Confidence == ConfidenceNoMatch {
-				continue
-			}
-			// Keep PROBABLE matches that clear the probable threshold.
-			if r.Confidence == ConfidenceProbable && r.CompositeScore < m.cfg.ProbableMatchThreshold {
-				continue
-			}
-			candidates = append(candidates, r)
-		}
+	// Group markets into events
+	polyEvents := models.GroupByEvent(polyMarkets)
+	kalshiEvents := models.GroupByEvent(kalshiMarkets)
+	fmt.Printf("[matcher] Event-level matching: %d poly events × %d kalshi events\n",
+		len(polyEvents), len(kalshiEvents))
+
+	// Match events, then pair child markets within matched events
+	eventResults := m.MatchEvents(polyEvents, kalshiEvents)
+
+	for _, er := range eventResults {
+		fmt.Printf("[matcher] %s event: %q ≈ %q (score=%.3f, %d market pairs)\n",
+			er.Confidence, er.EventA.EventTitle, er.EventB.EventTitle,
+			er.Score, len(er.MarketPairs))
 	}
 
-	// Sort by score so dedup keeps strongest pairs first.
-	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].CompositeScore > candidates[j-1].CompositeScore; j-- {
-			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
-		}
-	}
+	results := FlattenEventMatches(eventResults)
 
-	results := deduplicateByMarket(candidates)
-
-	fmt.Printf("[matcher] CrossPollinateJaccard: %d poly × %d kalshi → %d pairs\n",
-		len(polyMarkets), len(kalshiMarkets), len(results))
+	fmt.Printf("[matcher] CrossPollinateJaccard: %d poly events × %d kalshi events → %d event matches → %d market pairs\n",
+		len(polyEvents), len(kalshiEvents), len(eventResults), len(results))
 	return results
 }

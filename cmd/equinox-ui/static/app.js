@@ -26,6 +26,34 @@
     latest: function(venue, marketId) { return latestByKey[mkKey(venue, marketId)]; },
     history: function(venue, marketId) { return (historyByKey[mkKey(venue, marketId)] || []).slice(); }
   };
+
+  // When a live price arrives, update any route-form that references this market
+  // and recalculate the routing decision with fresh prices.
+  window.addEventListener("equinox-price-tick", function(evt) {
+    var d = evt.detail;
+    if (!d || !d.p) return;
+    var parts = d.key.split(":");
+    var venue = parts[0] || "";
+    var marketId = parts.slice(1).join(":") || "";
+    if (!marketId) return;
+
+    var forms = document.querySelectorAll(".route-form");
+    for (var i = 0; i < forms.length; i++) {
+      var f = forms[i];
+      if (f.dataset.marketIdA === marketId && (f.dataset.venueA || "").toLowerCase() === venue) {
+        f.dataset.yesA = String(d.p);
+        f.dataset.noA = String(1 - d.p);
+        var btn = f.querySelector(".route-calc-btn");
+        if (btn && window.recalcRoute) window.recalcRoute(btn);
+      }
+      if (f.dataset.marketIdB === marketId && (f.dataset.venueB || "").toLowerCase() === venue) {
+        f.dataset.yesB = String(d.p);
+        f.dataset.noB = String(1 - d.p);
+        var btn2 = f.querySelector(".route-calc-btn");
+        if (btn2 && window.recalcRoute) window.recalcRoute(btn2);
+      }
+    }
+  });
 })();
 
 (function() {

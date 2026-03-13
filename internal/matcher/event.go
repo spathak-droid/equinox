@@ -512,6 +512,8 @@ var comparatorMap = map[string]string{
 	"impeach|":     "impeach",
 	"resign|":      "resign",
 	"default|":     "default",
+	"qualify|":     "qualify",
+	"compete|":     "compete",
 }
 
 func extractComparator(norm, action, direction string) string {

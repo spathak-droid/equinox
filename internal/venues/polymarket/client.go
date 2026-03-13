@@ -504,14 +504,25 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 			"bestAsk":        mkt.BestAsk,
 			"spread":         mkt.Spread,
 			"image":          ev.Image,
+			"event_title":    ev.Title,
+			"event_slug":     ev.Slug,
 		}
 
-		// Overlay liquidity and volume from full market data if available.
+		// Overlay fields from full market data if available.
 		if full, ok := slugToFull[mkt.Slug]; ok {
 			payload["liquidityNum"] = full.LiquidityNum
 			payload["volume24hr"] = full.Volume24hr
 			if full.ClobTokenIDs != "" {
 				payload["clobTokenIds"] = full.ClobTokenIDs
+			}
+			if full.Description != "" {
+				payload["description"] = full.Description
+			}
+			if full.Category != "" {
+				payload["category"] = full.Category
+			}
+			if len(full.Tags) > 0 {
+				payload["tags"] = full.Tags
 			}
 		}
 
@@ -551,11 +562,16 @@ type searchEntry struct {
 	ev  publicSearchEvent
 }
 
-// fullMarketData holds the financial fields we enrich from /markets?slug=...
+// fullMarketData holds fields we enrich from /markets?slug=...
 type fullMarketData struct {
 	LiquidityNum float64 `json:"liquidityNum"`
 	Volume24hr   float64 `json:"volume24hr"`
 	ClobTokenIDs string  `json:"clobTokenIds"`
+	Description  string  `json:"description"`
+	Category     string  `json:"category"`
+	Tags         []struct {
+		Label string `json:"label"`
+	} `json:"tags"`
 }
 
 // fetchFullBySlug does a single batch GET /markets?slug=...&slug=... and returns
@@ -604,6 +620,11 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 		LiquidityNum float64 `json:"liquidityNum"`
 		Volume24hr   float64 `json:"volume24hr"`
 		ClobTokenIDs string  `json:"clobTokenIds"`
+		Description  string  `json:"description"`
+		Category     string  `json:"category"`
+		Tags         []struct {
+			Label string `json:"label"`
+		} `json:"tags"`
 	}
 	if err := json.Unmarshal(body, &markets); err != nil {
 		fmt.Printf("[polymarket] WARNING: fetchFullBySlug parse: %v\n", err)
@@ -616,6 +637,9 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 				LiquidityNum: m.LiquidityNum,
 				Volume24hr:   m.Volume24hr,
 				ClobTokenIDs: m.ClobTokenIDs,
+				Description:  m.Description,
+				Category:     m.Category,
+				Tags:         m.Tags,
 			}
 		}
 	}

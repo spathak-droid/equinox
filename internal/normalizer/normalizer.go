@@ -83,6 +83,9 @@ type polymarketRaw struct {
 	Events []struct {
 		Slug string `json:"slug"`
 	} `json:"events"`
+	// Event-level fields (injected by client from public-search)
+	EventTitle string `json:"event_title"`
+	EventSlug  string `json:"event_slug"`
 }
 
 func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
@@ -93,7 +96,9 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 
 	// Extract event slug for URL construction (Polymarket uses /event/<event-slug>/<market-slug>)
 	var eventSlug string
-	if len(raw.Events) > 0 && raw.Events[0].Slug != "" {
+	if raw.EventSlug != "" {
+		eventSlug = raw.EventSlug
+	} else if len(raw.Events) > 0 && raw.Events[0].Slug != "" {
 		eventSlug = raw.Events[0].Slug
 	}
 
@@ -117,6 +122,7 @@ func normalizePolymarket(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		VenueID:          models.VenuePolymarket,
 		VenueMarketID:    marketID,
 		VenueEventTicker: eventSlug,
+		VenueEventTitle:  raw.EventTitle,
 		VenueSlug:        raw.Slug,
 		Title:         raw.Question,
 		Subtitle:      raw.GroupItemTitle,

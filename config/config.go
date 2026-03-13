@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 // Config holds all runtime configuration for Equinox.
@@ -48,6 +50,10 @@ type Config struct {
 	NewsEnabled     bool
 	NewsMaxArticles int
 
+	// OpenAI API key for LLM-based event matching
+	OpenAIAPIKey string
+	OpenAIModel  string
+
 	// Fetch strategy: "category", "search", or "broad"
 	FetchStrategy string
 	// Markets per category when using category-bucketed fetch (default 50)
@@ -59,7 +65,9 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables and applies defaults.
+// Loads .env file if present (does not override existing env vars).
 func Load() (*Config, error) {
+	_ = godotenv.Load() // ignore error if .env doesn't exist
 	cfg := &Config{
 		KalshiAPIKey: os.Getenv("KALSHI_API_KEY"),
 
@@ -79,6 +87,9 @@ func Load() (*Config, error) {
 
 		PolymarketSearchAPI: envString("POLYMARKET_SEARCH_API", "https://gamma-api.polymarket.com/public-search"),
 		KalshiSearchAPI:     envString("KALSHI_SEARCH_API", "https://api.elections.kalshi.com/v1/search/series"),
+
+		OpenAIAPIKey: os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel:  envString("OPEN_AI_MODEL", "gpt-4o-mini"),
 
 		NewsEnabled:     envBool("NEWS_ENABLED", false),
 		NewsMaxArticles: envInt("NEWS_MAX_ARTICLES", 5),

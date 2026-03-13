@@ -180,10 +180,10 @@
         <div class="route-form" data-pair-idx="{{$i}}"
              data-yes-a="{{printf "%.6f" $p.MarketA.YesPrice}}" data-no-a="{{printf "%.6f" $p.MarketA.NoPrice}}"
              data-liq-a="{{printf "%.2f" $p.MarketA.Liquidity}}" data-spread-a="{{printf "%.6f" $p.MarketA.Spread}}"
-             data-venue-a="{{$p.MarketA.Venue}}"
+             data-venue-a="{{$p.MarketA.Venue}}" data-market-id-a="{{$p.MarketA.VenueMarketID}}"
              data-yes-b="{{printf "%.6f" $p.MarketB.YesPrice}}" data-no-b="{{printf "%.6f" $p.MarketB.NoPrice}}"
              data-liq-b="{{printf "%.2f" $p.MarketB.Liquidity}}" data-spread-b="{{printf "%.6f" $p.MarketB.Spread}}"
-             data-venue-b="{{$p.MarketB.Venue}}">
+             data-venue-b="{{$p.MarketB.Venue}}" data-market-id-b="{{$p.MarketB.VenueMarketID}}">
           <div class="route-form-row">
             <label class="route-label">Side</label>
             <div class="route-toggle">
