@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Equinox</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo-icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet">
@@ -14,11 +15,16 @@
 
 <div class="header">
   <div class="header-inner">
-    <a href="/" class="logo">
-      <div class="logo-icon">E</div>
-      <div class="logo-text">Equinox</div>
-    </a>
     {{if .HasQuery}}
+    <a href="/" class="logo">
+      <svg class="logo-icon" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(129,140,248,0.4)" stroke-width="2"/>
+        <path d="M8 22 L13 17 L17 20 L18 18" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M18 18 L22 13 L26 16 L30 10" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M18 18 L18 6 M15.5 8.5 L18 6 L20.5 8.5" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+      <span class="logo-text">EQUINOX</span>
+    </a>
     <form class="search-form" method="GET" action="/">
       <input class="search-input" type="text" name="q" value="{{.SearchQuery}}" placeholder="Search markets across venues..." autofocus>
       <button class="search-btn" type="submit">Search</button>
@@ -32,6 +38,7 @@
 {{if not .HasQuery}}
 <!-- Hero / landing -->
 <div class="hero">
+  <img class="hero-logo" src="/static/logo.svg" alt="Equinox">
   <div class="hero-title">Cross-venue market search</div>
   <div class="hero-sub">Find equivalent prediction markets on Polymarket and Kalshi side by side, with routing recommendations.</div>
   <form class="hero-form" method="GET" action="/">

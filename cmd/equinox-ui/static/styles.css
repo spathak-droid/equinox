@@ -36,9 +36,10 @@ body { font-family: 'Delius', -apple-system, BlinkMacSystemFont, sans-serif; bac
 /* Header */
 .header { position: sticky; top: 0; z-index: 50; background: rgba(6, 8, 13, 0.9); backdrop-filter: blur(20px) saturate(180%); border-bottom: 1px solid var(--border); }
 .header-inner { max-width: 1200px; margin: 0 auto; padding: 10px 20px; display: flex; align-items: center; gap: 16px; }
-.logo { display: flex; align-items: center; gap: 8px; text-decoration: none; flex-shrink: 0; }
-.logo-icon { width: 28px; height: 28px; border-radius: 7px; background: linear-gradient(135deg, var(--accent), #6366f1); display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; color: white; }
-.logo-text { font-size: 1rem; font-weight: 700; color: var(--text-primary); letter-spacing: -0.3px; }
+.logo { display: flex; align-items: center; gap: 8px; text-decoration: none; flex-shrink: 0; min-width: 140px; }
+.logo-icon { height: 36px; width: 36px; }
+.logo-img { height: 36px; width: auto; }
+.logo-text { font-size: 1.1rem; font-weight: 800; letter-spacing: -0.5px; color: var(--text-primary); }
 .search-form { display: flex; align-items: center; gap: 6px; flex: 1; max-width: 500px; margin-left: auto; }
 .search-input { flex: 1; padding: 7px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 999px; color: var(--text-primary); font-size: 0.8rem; font-family: inherit; transition: all 200ms; }
 .search-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
@@ -51,6 +52,7 @@ body { font-family: 'Delius', -apple-system, BlinkMacSystemFont, sans-serif; bac
 
 /* Hero */
 .hero { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; padding: 40px 20px; }
+.hero-logo { width: 120px; height: auto; margin-bottom: 16px; }
 .hero-title { font-size: 2.2rem; font-weight: 800; letter-spacing: -1px; background: linear-gradient(135deg, var(--text-primary), var(--accent-bright)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
 .hero-sub { font-size: 0.9rem; color: var(--text-muted); max-width: 400px; margin-bottom: 28px; line-height: 1.5; }
 .hero-form { display: flex; gap: 8px; width: 100%; max-width: 480px; }

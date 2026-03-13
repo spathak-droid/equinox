@@ -434,6 +434,21 @@
     // Ensure header search form is visible (it's absent on the landing page)
     var headerInner = document.querySelector(".header-inner");
     if (headerInner && !headerInner.querySelector(".search-form")) {
+      // Add logo if missing (landing page transition)
+      if (!headerInner.querySelector(".logo")) {
+        var logo = document.createElement("a");
+        logo.href = "/";
+        logo.className = "logo";
+        logo.innerHTML =
+          '<svg class="logo-icon" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">' +
+            '<circle cx="18" cy="18" r="15" fill="none" stroke="rgba(129,140,248,0.4)" stroke-width="2"/>' +
+            '<path d="M8 22 L13 17 L17 20 L18 18" fill="none" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+            '<path d="M18 18 L22 13 L26 16 L30 10" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+            '<path d="M18 18 L18 6 M15.5 8.5 L18 6 L20.5 8.5" fill="none" stroke="#34d399" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>' +
+          '</svg>' +
+          '<span class="logo-text">EQUINOX</span>';
+        headerInner.prepend(logo);
+      }
       var form = document.createElement("form");
       form.className = "search-form";
       form.method = "GET";
