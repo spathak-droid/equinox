@@ -1,0 +1,662 @@
+[
+  {
+    "name": "btc_100k_identical",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 by end of 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Bitcoin reach $100,000 by end of 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.63,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.45,
+    "max_score": 1.0
+  },
+  {
+    "name": "btc_100k_reach_both",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 by end of 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "BTC to reach $100k before 2027",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.62,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "btc_100k_question_reformulation",
+    "market_a": {
+      "title": "Will Bitcoin hit $100,000 in 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Bitcoin to reach $100k by end of 2026",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.64,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "trump_2028_election",
+    "market_a": {
+      "title": "Will Trump win the 2028 Presidential Election?",
+      "venue_id": "polymarket",
+      "category": "politics",
+      "yes_price": 0.45,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Donald Trump to win 2028 presidential election",
+      "venue_id": "kalshi",
+      "category": "politics",
+      "yes_price": 0.48,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "fed_rate_cut_same_verb",
+    "market_a": {
+      "title": "Will the Fed cut interest rates in 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.55,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Federal Reserve to cut rates before 2027",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.52,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.25,
+    "max_score": 1.0
+  },
+  {
+    "name": "eth_5000_same_verb",
+    "market_a": {
+      "title": "Will Ethereum reach $5,000 by June 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.30,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "ETH to reach $5000 before July 2026",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.28,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "lakers_nba_championship",
+    "market_a": {
+      "title": "Lakers win NBA Championship 2026",
+      "venue_id": "polymarket",
+      "category": "sports",
+      "yes_price": 0.12,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Los Angeles Lakers to win 2026 NBA Finals",
+      "venue_id": "kalshi",
+      "category": "sports",
+      "yes_price": 0.10,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.30,
+    "max_score": 1.0
+  },
+  {
+    "name": "inflation_above_3pct_same_verb",
+    "market_a": {
+      "title": "Will inflation exceed 3% in June 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.40,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will inflation exceed 3% by June 2026?",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.38,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.45,
+    "max_score": 1.0
+  },
+  {
+    "name": "sp500_above_6000_same_verb",
+    "market_a": {
+      "title": "Will the S&P 500 reach 6000 by end of 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.55,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "S&P 500 to reach 6000 before 2027",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.52,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "tiktok_ban_us",
+    "market_a": {
+      "title": "Will TikTok be banned in the United States by 2027?",
+      "venue_id": "polymarket",
+      "category": "technology",
+      "yes_price": 0.25,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "market_b": {
+      "title": "TikTok banned in the US before 2027",
+      "venue_id": "kalshi",
+      "category": "technology",
+      "yes_price": 0.22,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "tesla_stock_300",
+    "market_a": {
+      "title": "Will Tesla stock reach $300 by end of 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.70,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Tesla share price reach $300 before 2027",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.68,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "china_taiwan_invasion",
+    "market_a": {
+      "title": "Will China invade Taiwan before 2027?",
+      "venue_id": "polymarket",
+      "category": "geopolitics",
+      "yes_price": 0.05,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "market_b": {
+      "title": "China to invade Taiwan by end of 2026",
+      "venue_id": "kalshi",
+      "category": "geopolitics",
+      "yes_price": 0.04,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "solana_price_200",
+    "market_a": {
+      "title": "Will Solana reach $200 in 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.45,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "SOL to reach $200 before 2027",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.43,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.30,
+    "max_score": 1.0
+  },
+  {
+    "name": "us_gdp_growth_2026",
+    "market_a": {
+      "title": "Will US GDP growth exceed 3% in 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.35,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "US GDP growth to exceed 3% for 2026",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.33,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.40,
+    "max_score": 1.0
+  },
+  {
+    "name": "ecb_rate_cut_2026",
+    "market_a": {
+      "title": "Will the ECB cut rates in 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.60,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "ECB to cut interest rates before 2027",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.58,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "match",
+    "min_score": 0.35,
+    "max_score": 1.0
+  },
+  {
+    "name": "nomatch_btc_different_thresholds",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 in 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Bitcoin reach $50,000 in 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.90,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_trump_win_vs_impeach",
+    "market_a": {
+      "title": "Will Trump win the 2028 election?",
+      "venue_id": "polymarket",
+      "category": "politics",
+      "yes_price": 0.45,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Trump be impeached before 2028?",
+      "venue_id": "kalshi",
+      "category": "politics",
+      "yes_price": 0.10,
+      "resolution_date": "2028-01-01T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_fed_cut_vs_raise",
+    "market_a": {
+      "title": "Will the Federal Reserve cut rates in 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.55,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will the Federal Reserve raise rates in 2026?",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.15,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_different_candidates",
+    "market_a": {
+      "title": "Will Trump win the 2028 Presidential Election?",
+      "venue_id": "polymarket",
+      "category": "politics",
+      "yes_price": 0.45,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Harris win the 2028 Presidential Election?",
+      "venue_id": "kalshi",
+      "category": "politics",
+      "yes_price": 0.35,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_different_years_gdp",
+    "market_a": {
+      "title": "Will US GDP growth exceed 3% in 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.35,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will US GDP growth exceed 3% in 2028?",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.30,
+      "resolution_date": "2028-12-31T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_nba_vs_nfl",
+    "market_a": {
+      "title": "Lakers win NBA Championship 2026",
+      "venue_id": "polymarket",
+      "category": "sports",
+      "yes_price": 0.12,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Chiefs win NFL Super Bowl 2026",
+      "venue_id": "kalshi",
+      "category": "sports",
+      "yes_price": 0.15,
+      "resolution_date": "2026-02-15T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_lakers_vs_celtics",
+    "market_a": {
+      "title": "Will the Los Angeles Lakers win the 2026 NBA Finals?",
+      "venue_id": "polymarket",
+      "category": "sports",
+      "yes_price": 0.12,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will the Boston Celtics win the 2026 NBA Finals?",
+      "venue_id": "kalshi",
+      "category": "sports",
+      "yes_price": 0.18,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_midterms_vs_presidential",
+    "market_a": {
+      "title": "Will Republicans win the 2026 midterm elections?",
+      "venue_id": "polymarket",
+      "category": "politics",
+      "yes_price": 0.55,
+      "resolution_date": "2026-11-03T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Republicans win the 2028 presidential election?",
+      "venue_id": "kalshi",
+      "category": "politics",
+      "yes_price": 0.48,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_btc_reach_vs_drop",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 in 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Bitcoin drop below $100,000 in 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.40,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_completely_unrelated",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 in 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Trump win the 2028 election?",
+      "venue_id": "kalshi",
+      "category": "politics",
+      "yes_price": 0.45,
+      "resolution_date": "2028-11-05T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.35
+  },
+  {
+    "name": "nomatch_eth_different_thresholds",
+    "market_a": {
+      "title": "Will Ethereum reach $5,000 by June 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.30,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Ethereum reach $10,000 by June 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.08,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_china_invade_vs_russia_invade",
+    "market_a": {
+      "title": "Will China invade Taiwan before 2027?",
+      "venue_id": "polymarket",
+      "category": "geopolitics",
+      "yes_price": 0.05,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Russia invade Finland before 2027?",
+      "venue_id": "kalshi",
+      "category": "geopolitics",
+      "yes_price": 0.02,
+      "resolution_date": "2027-01-01T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.44
+  },
+  {
+    "name": "nomatch_hottest_year_vs_gdp",
+    "market_a": {
+      "title": "Will 2026 be the hottest year on record?",
+      "venue_id": "polymarket",
+      "category": "science",
+      "yes_price": 0.70,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will US GDP grow in 2026?",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.80,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "no_match",
+    "min_score": 0.0,
+    "max_score": 0.35
+  },
+  {
+    "name": "probable_fed_rate_cut_monthly_vs_quarterly",
+    "market_a": {
+      "title": "Will the Fed cut rates in March 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.30,
+      "resolution_date": "2026-03-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Federal Reserve to cut rates in Q1 2026",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.35,
+      "resolution_date": "2026-03-31T00:00:00Z"
+    },
+    "expected": "probable",
+    "min_score": 0.20,
+    "max_score": 0.65
+  },
+  {
+    "name": "probable_tesla_with_and_without_date",
+    "market_a": {
+      "title": "Will Tesla stock reach $300 by June 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.55,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Tesla stock reach $300",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.60,
+      "resolution_date": null
+    },
+    "expected": "probable",
+    "min_score": 0.20,
+    "max_score": 0.70
+  },
+  {
+    "name": "probable_inflation_slightly_different_phrasing",
+    "market_a": {
+      "title": "Will inflation exceed 4% in March 2026?",
+      "venue_id": "polymarket",
+      "category": "economics",
+      "yes_price": 0.20,
+      "resolution_date": "2026-03-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Inflation to exceed 4% in Q1 2026",
+      "venue_id": "kalshi",
+      "category": "economics",
+      "yes_price": 0.22,
+      "resolution_date": "2026-03-31T00:00:00Z"
+    },
+    "expected": "probable",
+    "min_score": 0.25,
+    "max_score": 0.80
+  },
+  {
+    "name": "probable_btc_dec_vs_eoy",
+    "market_a": {
+      "title": "Will Bitcoin reach $100,000 by December 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.65,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Bitcoin reach $100k by end of 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.62,
+      "resolution_date": "2026-12-31T00:00:00Z"
+    },
+    "expected": "probable",
+    "min_score": 0.30,
+    "max_score": 1.0
+  },
+  {
+    "name": "probable_eth_nearby_dates",
+    "market_a": {
+      "title": "Will Ethereum reach $5,000 by June 2026?",
+      "venue_id": "polymarket",
+      "category": "crypto",
+      "yes_price": 0.30,
+      "resolution_date": "2026-06-30T00:00:00Z"
+    },
+    "market_b": {
+      "title": "Will Ethereum reach $5000 by September 2026?",
+      "venue_id": "kalshi",
+      "category": "crypto",
+      "yes_price": 0.40,
+      "resolution_date": "2026-09-30T00:00:00Z"
+    },
+    "expected": "probable",
+    "min_score": 0.25,
+    "max_score": 0.70
+  }
+]

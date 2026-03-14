@@ -199,9 +199,19 @@ func TestCrossPollinateJaccard(t *testing.T) {
 	}
 
 	results := m.CrossPollinateJaccard(poly, kalshi)
-	// These should match since they're the same event
-	if len(results) == 0 {
-		t.Log("CrossPollinateJaccard: no matches found (acceptable if semantic gate is strict)")
+	// Regardless of whether matches are found, verify all results are cross-venue
+	for _, r := range results {
+		if r.MarketA.VenueID == r.MarketB.VenueID {
+			t.Errorf("expected cross-venue pairs only, got same venue %s", r.MarketA.VenueID)
+		}
+		if r.CompositeScore < 0 || r.CompositeScore > 1.5 {
+			t.Errorf("composite score %.3f out of expected range [0, 1.5]", r.CompositeScore)
+		}
+	}
+	// With these nearly identical titles, we expect at least 0 results (semantic gate may be strict).
+	// But if results are returned, they must be valid.
+	if len(results) > 1 {
+		t.Errorf("expected at most 1 result for a single pair of markets, got %d", len(results))
 	}
 }
 
@@ -242,8 +252,24 @@ func TestFindEquivalentPairsFromSearch(t *testing.T) {
 
 	ctx := context.Background()
 	results := m.FindEquivalentPairsFromSearch(ctx, searchResults, "bitcoin")
-	// Results depend on scoring thresholds, just verify no panic
-	_ = results
+
+	// Verify all results are cross-venue only
+	for _, r := range results {
+		if r.MarketA.VenueID == r.MarketB.VenueID {
+			t.Errorf("expected cross-venue pairs only, got same venue %s", r.MarketA.VenueID)
+		}
+	}
+
+	// Verify no duplicate market IDs appear in results
+	seen := make(map[string]bool)
+	for _, r := range results {
+		keyAB := r.MarketA.VenueMarketID + "|" + r.MarketB.VenueMarketID
+		keyBA := r.MarketB.VenueMarketID + "|" + r.MarketA.VenueMarketID
+		if seen[keyAB] || seen[keyBA] {
+			t.Errorf("duplicate pair found: %s vs %s", r.MarketA.VenueMarketID, r.MarketB.VenueMarketID)
+		}
+		seen[keyAB] = true
+	}
 }
 
 func TestCountRawPairs(t *testing.T) {

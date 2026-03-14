@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -33,20 +34,34 @@ func TestBuildIndex(t *testing.T) {
 }
 
 func TestBuildIndexIDFFiltering(t *testing.T) {
-	// Create enough markets so a keyword exceeds 10% threshold
+	// Create 600 markets so the IDF threshold = max(600/10, 50) = 60.
+	// "will" appears in all 600 titles and should be filtered out.
+	// "rarekeyword" appears in only 1 title and should survive.
 	var markets []*models.CanonicalMarket
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 600; i++ {
+		title := fmt.Sprintf("Will something happen scenario%d", i)
+		if i == 0 {
+			title = "Will rarekeyword happen scenario0"
+		}
 		markets = append(markets, &models.CanonicalMarket{
-			VenueMarketID: "m" + string(rune('0'+i)),
+			VenueMarketID: fmt.Sprintf("m%d", i),
 			VenueID:       models.VenuePolymarket,
-			Title:         "Common keyword unique" + string(rune('A'+i)),
+			Title:         title,
 		})
 	}
 	idx := BuildIndex(markets)
-	// "common" and "keyword" appear in all 100 — should be filtered (threshold=50 minimum)
-	// But with only 100 markets and threshold=max(100/10, 50)=50, they won't be filtered
-	// This just verifies the index builds without panicking
-	_ = idx
+
+	// "will" appears in all 600 titles, threshold is 60 => should be filtered
+	if _, found := idx.inverted["will"]; found {
+		t.Error("expected 'will' to be filtered from inverted index (appears in all 600 markets)")
+	}
+
+	// "rarekeyword" appears in only 1 title => should NOT be filtered
+	if ids, found := idx.inverted["rarekeyword"]; !found {
+		t.Error("expected 'rarekeyword' to be in inverted index (appears in only 1 market)")
+	} else if len(ids) != 1 {
+		t.Errorf("expected 'rarekeyword' to map to 1 market, got %d", len(ids))
+	}
 }
 
 func TestFindCandidatesCrossVenueOnly(t *testing.T) {
@@ -325,9 +340,29 @@ func TestFindEquivalentPairsFromClustersNoPanic(t *testing.T) {
 
 	ctx := context.Background()
 	results, clusterResults := m.FindEquivalentPairsFromClusters(ctx, markets)
-	// Verify no panics and basic properties
-	_ = results
-	_ = clusterResults
+
+	// Verify results only contain cross-venue pairs
+	for _, r := range results {
+		if r.MarketA.VenueID == r.MarketB.VenueID {
+			t.Errorf("expected cross-venue pairs only, got same venue %s for %s vs %s",
+				r.MarketA.VenueID, r.MarketA.VenueMarketID, r.MarketB.VenueMarketID)
+		}
+		if r.CompositeScore < 0 || r.CompositeScore > 1.5 {
+			t.Errorf("composite score %.3f out of expected range [0, 1.5]", r.CompositeScore)
+		}
+	}
+
+	// Verify cluster results contain valid data
+	for _, cr := range clusterResults {
+		for _, p := range cr.Pairs {
+			if p.MarketA.VenueID == p.MarketB.VenueID {
+				t.Errorf("cluster pair should be cross-venue, got same venue %s", p.MarketA.VenueID)
+			}
+			if p.CompositeScore < 0 || p.CompositeScore > 1.5 {
+				t.Errorf("cluster pair composite score %.3f out of expected range [0, 1.5]", p.CompositeScore)
+			}
+		}
+	}
 }
 
 func TestCategoryLabel(t *testing.T) {

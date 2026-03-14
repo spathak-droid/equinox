@@ -148,6 +148,17 @@ func TestScoreVenueZeroOrderSize(t *testing.T) {
 	if s.TotalScore <= 0 {
 		t.Errorf("expected positive score even with zero order size, got %.4f", s.TotalScore)
 	}
+	if s.TotalScore > 1.0 {
+		t.Errorf("expected score <= 1.0, got %.4f", s.TotalScore)
+	}
+	// Price score for YES with YesPrice=0.5 should be 0.5
+	if math.Abs(s.PriceScore-0.5) > 0.001 {
+		t.Errorf("price score = %.4f, want 0.5", s.PriceScore)
+	}
+	// Liquidity score with 1000 liquidity and adjusted order size of 1.0: tanh(1000) ~ 1.0
+	if s.LiquidityScore < 0.99 {
+		t.Errorf("liquidity score = %.4f, want ~1.0 (high liquidity vs adjusted order size)", s.LiquidityScore)
+	}
 }
 
 func TestRouteExplanationContainsKey(t *testing.T) {
@@ -177,8 +188,10 @@ func TestRouteExplanationContainsKey(t *testing.T) {
 func TestRouteLiquidityWarningInExplanation(t *testing.T) {
 	r := New(testCfg())
 
+	// Both venues have liquidity well below the $1000 order size,
+	// so the selected venue must trigger the "NOT enough" warning.
 	pair := &matcher.MatchResult{
-		Confidence: matcher.ConfidenceMatch,
+		Confidence:     matcher.ConfidenceMatch,
 		CompositeScore: 0.85,
 		MarketA: &models.CanonicalMarket{
 			VenueID: models.VenuePolymarket, YesPrice: 0.30, Liquidity: 200, Spread: 0,
@@ -190,9 +203,10 @@ func TestRouteLiquidityWarningInExplanation(t *testing.T) {
 
 	decision := r.Route(&Order{EventTitle: "Test", Side: SideYes, SizeUSD: 1000}, pair)
 
-	// Should warn about insufficient liquidity
-	if !strings.Contains(decision.Explanation, "NOT enough") && !strings.Contains(decision.Explanation, "Warning") {
-		t.Log("Note: liquidity warning may be present in scoring but not always in explanation text")
+	// The selected venue (Polymarket, liquidity=200) has liquidity < order size (1000),
+	// so the explanation must contain the "NOT enough" warning.
+	if !strings.Contains(decision.Explanation, "NOT enough") {
+		t.Errorf("expected 'NOT enough' liquidity warning in explanation when liquidity ($200) < order size ($1000).\nExplanation:\n%s", decision.Explanation)
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"github.com/equinox/internal/normalizer"
 	"github.com/equinox/internal/router"
 	"github.com/equinox/internal/storage"
+	"github.com/equinox/internal/tracing"
 	"github.com/equinox/internal/venues/kalshi"
 	"github.com/equinox/internal/venues/polymarket"
 	"github.com/joho/godotenv"
@@ -70,6 +71,11 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// Initialize Langfuse tracer (no-op when LANGFUSE_PUBLIC_KEY is not set)
+	tracer := tracing.New(ctx)
+	defer tracer.Flush(ctx)
+	_ = tracer // TODO: wire spans into matching pipeline
 
 	mtch := matcher.New(cfg)
 

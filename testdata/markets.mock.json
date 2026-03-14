@@ -7,6 +7,7 @@
       "endDateIso": "2026-06-30T23:59:59Z",
       "outcomePrices": "[\"0.58\", \"0.42\"]",
       "volume": "120000",
+      "volume24hr": 18000,
       "liquidityNum": 30000,
       "category": "economics",
       "tags": [
@@ -15,53 +16,57 @@
       ]
     },
     {
-      "id": "pm-fx-fed-002",
-      "question": "Will ETH hit $3500 before 2026-09-01?",
-      "description": "Simple price event for ETH.",
-      "endDateIso": "2026-09-01T23:59:59Z",
-      "outcomePrices": "[\"0.32\", \"0.68\"]",
-      "volume": "60000",
-      "liquidityNum": 12000,
+      "id": "pm-btc-100k-001",
+      "question": "Will Bitcoin reach $100,000 by end of 2026?",
+      "description": "Resolves YES if Bitcoin trades at or above $100,000 on any exchange before December 31, 2026.",
+      "endDateIso": "2026-12-31T23:59:59Z",
+      "outcomePrices": "[\"0.65\", \"0.35\"]",
+      "volume": "250000",
+      "volume24hr": 42000,
+      "liquidityNum": 55000,
       "category": "crypto",
       "tags": [
-        {"label": "crypto"}
+        {"label": "crypto"},
+        {"label": "bitcoin"}
       ]
     }
   ],
   "kalshi": [
     {
       "ticker": "KX-FED-RATE-2026",
-      "title": "Will the Federal Reserve cut rates by 25 bps or more before June 30, 2026?",
-      "subtitle": "Fed cutoff rule with close date",
-      "category": "economics",
+      "event_ticker": "FEDRATE-2026-Q2",
+      "title": "Fed rate cut Q2 2026",
+      "subtitle": "25bps or more by June 30",
       "status": "active",
       "close_time": "2026-06-30T23:59:59Z",
-      "yes_bid": 58,
+      "yes_bid": 56,
       "yes_ask": 60,
       "no_bid": 40,
-      "no_ask": 42,
+      "no_ask": 44,
       "volume": 42000,
       "volume_24h": 28000,
       "open_interest": 14000,
       "liquidity": 17000,
-      "rules_html": "<p>Settlement criteria: Fed rate decision by June 30, 2026.</p>"
+      "rules_primary": "Settlement criteria: Federal Reserve rate decision by June 30, 2026. Market resolves YES if FOMC cuts the target rate by 25bps or more.",
+      "rules_secondary": ""
     },
     {
-      "ticker": "KX-ETH-2026",
-      "title": "Will ETH reach $3600 before September 1, 2026?",
-      "subtitle": "Derivative-style close",
-      "category": "crypto",
+      "ticker": "KX-BTC-100K-2026",
+      "event_ticker": "BTCPRICE-2026",
+      "title": "BTC price $100k by 2026",
+      "subtitle": "Bitcoin to hit $100,000",
       "status": "active",
-      "close_time": "2026-09-01T23:59:59Z",
-      "yes_bid": 35,
-      "yes_ask": 36,
-      "no_bid": 64,
-      "no_ask": 65,
-      "volume": 15000,
-      "volume_24h": 8000,
-      "open_interest": 5000,
-      "liquidity": 9000,
-      "rules_html": "<p>Resolution close event.</p>"
+      "close_time": "2026-12-31T23:59:59Z",
+      "yes_bid": 62,
+      "yes_ask": 66,
+      "no_bid": 34,
+      "no_ask": 38,
+      "volume": 85000,
+      "volume_24h": 15000,
+      "open_interest": 32000,
+      "liquidity": 40000,
+      "rules_primary": "Resolves YES if Bitcoin price reaches $100,000 USD on any major exchange before January 1, 2027.",
+      "rules_secondary": ""
     }
   ]
 }
