@@ -1,0 +1,79 @@
+name: Index Markets
+
+on:
+  # Run every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      venue:
+        description: 'Venue to index (leave empty for all)'
+        required: false
+        default: ''
+      purge_age:
+        description: 'Purge markets older than (e.g. 48h)'
+        required: false
+        default: '48h'
+
+permissions:
+  contents: write
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Install dependencies
+        run: go mod tidy
+
+      - name: Build indexer
+        run: go build -o bin/indexer ./cmd/indexer
+
+      - name: Restore market database
+        uses: actions/cache@v4
+        with:
+          path: equinox_markets.db
+          key: market-db-${{ github.ref_name }}
+          restore-keys: |
+            market-db-
+
+      - name: Purge stale markets
+        if: ${{ github.event.inputs.purge_age != '' || github.event_name == 'schedule' }}
+        run: |
+          PURGE_AGE="${{ github.event.inputs.purge_age || '48h' }}"
+          ./bin/indexer -purge "$PURGE_AGE" || true
+
+      - name: Index markets
+        env:
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+        run: |
+          VENUE_FLAG=""
+          if [ -n "${{ github.event.inputs.venue }}" ]; then
+            VENUE_FLAG="-venue ${{ github.event.inputs.venue }}"
+          fi
+          ./bin/indexer $VENUE_FLAG -timeout 20m
+
+      - name: Show statistics
+        run: ./bin/indexer -stats
+
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-database
+          path: equinox_markets.db
+          retention-days: 30
+
+      - name: Cache market database
+        uses: actions/cache/save@v4
+        with:
+          path: equinox_markets.db
+          key: market-db-${{ github.ref_name }}-${{ github.run_id }}
