@@ -159,7 +159,8 @@ func matchEventsViaLLM(ctx context.Context, cfg *config.Config, eventsA, eventsB
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.OpenAIAPIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	eventHTTPClient := &http.Client{Timeout: 60 * time.Second}
+	resp, err := eventHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("calling OpenAI: %w", err)
 	}

@@ -242,7 +242,7 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 		VenueEventTicker:  raw.EventTicker,
 		VenueSeriesTicker: raw.SeriesTicker,
 		VenueEventTitle:   raw.EventTitle,
-		Title:         kalshiCanonicalTitle(raw.EventTitle, raw.Subtitle),
+		Title:         kalshiCanonicalTitle(raw.EventTitle, raw.Subtitle, raw.RulesPrimary),
 		Subtitle:      raw.Subtitle,
 		Description:   raw.Subtitle,
 		Category:      cat,
@@ -280,18 +280,88 @@ func normalizeKalshi(r *venues.RawMarket) (*models.CanonicalMarket, error) {
 
 // kalshiCanonicalTitle builds a full descriptive title for a Kalshi market.
 // Combines the event title with the market subtitle (e.g. "Champions League Winner — Arsenal").
-func kalshiCanonicalTitle(eventTitle, subtitle string) string {
+// When the subtitle is a party/affiliation label (prefixed with "::"), it extracts the
+// actual entity name from rules_primary instead (e.g. "If Mark Kelly is..." → "Mark Kelly").
+func kalshiCanonicalTitle(eventTitle, subtitle, rulesPrimary string) string {
 	event := strings.TrimSpace(eventTitle)
 	sub := strings.TrimSpace(subtitle)
 
-	if event == "" {
-		return sub
-	}
-	if sub == "" {
-		return event
+	// Kalshi uses "::" prefix for affiliation labels (e.g. ":: Democratic", ":: Michigan St.")
+	// Strip the prefix and try to get a better name from rules_primary.
+	if strings.HasPrefix(sub, "::") {
+		sub = strings.TrimSpace(strings.TrimPrefix(sub, "::"))
+		// Try to extract entity name from rules_primary: "If <Name> is/wins/..." → <Name>
+		if extracted := extractEntityFromRules(rulesPrimary); extracted != "" {
+			sub = extracted
+		}
+		// If extraction failed, keep the stripped affiliation (e.g. "Democratic")
 	}
 
-	return event + " — " + sub
+	var title string
+	if event == "" {
+		title = sub
+	} else if sub == "" {
+		title = event
+	} else {
+		title = event + " — " + sub
+	}
+
+	// Kalshi obfuscates league names for licensing reasons. Normalize them so
+	// downstream matching sees standard league names (e.g. "Pro Basketball" → "NBA").
+	title = normalizeKalshiLeagueNames(title)
+
+	return title
+}
+
+// normalizeKalshiLeagueNames replaces Kalshi's obfuscated league names with
+// their standard abbreviations. This is venue-specific logic that belongs in
+// the normalizer so the matcher never has to deal with it.
+func normalizeKalshiLeagueNames(title string) string {
+	// Order matters: longer/more-specific replacements must come first to avoid
+	// partial matches (e.g. "Pro Basketball Finals" before "Pro Basketball").
+	replacements := []struct{ from, to string }{
+		{"Pro Basketball Finals", "NBA Finals"},
+		{"Pro Basketball Championship", "NBA Finals"},
+		{"Pro Football Championship", "Super Bowl"},
+		{"Pro Baseball World Series", "World Series"},
+		{"Pro Basketball", "NBA"},
+		{"Pro Football", "NFL"},
+		{"Pro Baseball", "MLB"},
+		{"Pro Hockey", "NHL"},
+		{"Pro Soccer", "MLS"},
+		{"Men's World Cup", "FIFA World Cup"},
+		{"Women's World Cup", "FIFA Women's World Cup"},
+	}
+	for _, r := range replacements {
+		if strings.Contains(title, r.from) {
+			title = strings.ReplaceAll(title, r.from, r.to)
+		}
+	}
+	return title
+}
+
+// extractEntityFromRules pulls the entity name from Kalshi's rules_primary field.
+// Pattern: "If <entity name> is/wins/receives/..." → returns the entity name.
+func extractEntityFromRules(rules string) string {
+	if !strings.HasPrefix(rules, "If ") {
+		return ""
+	}
+	rest := rules[3:] // skip "If "
+
+	// Find the first verb that separates the entity name from the predicate.
+	// Common patterns: "is the next", "wins", "receives", "finishes"
+	verbs := []string{" is ", " wins ", " receives ", " finishes ", " becomes ", " gets ", " has ", " does "}
+	bestIdx := -1
+	for _, v := range verbs {
+		idx := strings.Index(rest, v)
+		if idx > 0 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+		}
+	}
+	if bestIdx <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:bestIdx])
 }
 
 // estimateKalshiLiquidity derives a liquidity proxy from volume and spread

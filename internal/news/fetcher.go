@@ -112,7 +112,7 @@ func (f *Fetcher) fetchRSS(ctx context.Context, query string) *MarketNews {
 		return mn
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
 		mn.Error = fmt.Sprintf("reading RSS body: %v", err)
 		return mn

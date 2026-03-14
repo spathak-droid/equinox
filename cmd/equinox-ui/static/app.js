@@ -209,7 +209,7 @@
     links.innerHTML = "";
     var venueLink = safe(d.venueLink);
     if (venueLink && venueLink !== "--") {
-      links.innerHTML += '<a class="modal-link" href="' + venueLink + '" target="_blank" rel="noopener"><span class="material-icons-round">open_in_new</span>' + venueName + '</a>';
+      links.innerHTML += '<a class="modal-link" href="' + escAttr(venueLink) + '" target="_blank" rel="noopener"><span class="material-icons-round">open_in_new</span>' + escTxt(venueName) + '</a>';
     }
 
     modal.classList.add("is-open");
@@ -501,7 +501,7 @@
 
   function venueTag(venue) {
     if (!venue) return "";
-    return '<span class="loader-venue-' + venue + '">' + venue + '</span>';
+    return '<span class="loader-venue-' + escHtml(venue) + '">' + escHtml(venue) + '</span>';
   }
 
   function countBadge(n) {
@@ -624,7 +624,7 @@
       renderNewsSection(p) +
       '<div class="pair-explain" id="explain-s' + idx + '">' +
         '<div class="pair-explain-inner">' +
-          '<div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>' + escHtml(p.explanation) + '</div>' +
+          '<div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div><span class="pair-explain-text">' + escHtml(p.explanation) + '</span></div>' +
           '<div class="pair-explain-section">' +
             '<div class="pair-explain-label">Routing decision</div>' +
             '<div class="route-form" data-pair-idx="s' + idx + '"' +
@@ -784,25 +784,14 @@
     };
   }
 
-  document.querySelectorAll("form").forEach(function(form) {
-    form.addEventListener("submit", function(e) {
-      var input = form.querySelector("[name=q]");
-      if (!input) return;
-      var q = input.value.trim();
-      if (!q) return;
-      e.preventDefault();
-      startStreamSearch(q, false);
-    });
-  });
+  // Forms and hero hints navigate naturally via GET /?q=...
+  // for instant index results. startStreamSearch is kept global
+  // for the "Search Live" button's onclick.
+  window.startStreamSearch = startStreamSearch;
 
-  // Intercept hint links (they navigate directly, skip them to stay SSE-driven)
-  document.querySelectorAll(".hero-hint").forEach(function(a) {
-    a.addEventListener("click", function(e) {
-      e.preventDefault();
-      var url = new URL(a.href);
-      var q = url.searchParams.get("q") || "";
-      if (q) startStreamSearch(q, false);
-    });
+  // Handle browser back/forward: reload the page so the server renders the correct state.
+  window.addEventListener("popstate", function() {
+    window.location.reload();
   });
 
   // ─── Route form: client-side routing calculation ───────────────────────
@@ -880,7 +869,7 @@
       if (spread === 0) { spreadLabel = "N/A"; }
       else { spreadLabel = fmtBps(spread) + " bps"; }
       return '<div class="' + cls + '">' +
-        '<div class="rv-head"><span class="rv-venue">' + name + '</span>' + badge + '<span class="rv-score">' + s.total.toFixed(3) + '</span></div>' +
+        '<div class="rv-head"><span class="rv-venue">' + escHtml(name) + '</span>' + badge + '<span class="rv-score">' + s.total.toFixed(3) + '</span></div>' +
         '<div class="rv-stats">' +
           '<div class="rv-stat"><div class="rv-stat-label">Price</div><div class="rv-stat-val">$' + cost.toFixed(4) + '</div></div>' +
           '<div class="rv-stat"><div class="rv-stat-label">Shares</div><div class="rv-stat-val">~' + Math.round(shares).toLocaleString() + '</div></div>' +
@@ -894,15 +883,15 @@
     var reasons = [];
     if (winScore.price > loseScore.price && costLose > 0) {
       var pctDiff = ((costLose - costWin) / costLose * 100).toFixed(1);
-      reasons.push("Better price: $" + costWin.toFixed(4) + " vs $" + costLose.toFixed(4) + " on " + loseVenue + " (" + pctDiff + "% cheaper)");
+      reasons.push("Better price: $" + costWin.toFixed(4) + " vs $" + costLose.toFixed(4) + " on " + escHtml(loseVenue) + " (" + pctDiff + "% cheaper)");
     }
     if (winLiq > loseLiq * 2) {
-      reasons.push("Much deeper liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + loseVenue);
+      reasons.push("Much deeper liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + escHtml(loseVenue));
     } else if (winLiq > loseLiq) {
-      reasons.push("More liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + loseVenue);
+      reasons.push("More liquidity: " + fmtK(winLiq) + " vs " + fmtK(loseLiq) + " on " + escHtml(loseVenue));
     }
     if (winScore.spread > loseScore.spread && winSpread > 0) {
-      reasons.push("Tighter spread: " + fmtBps(winSpread) + " bps vs " + fmtBps(loseSpread) + " bps on " + loseVenue);
+      reasons.push("Tighter spread: " + fmtBps(winSpread) + " bps vs " + fmtBps(loseSpread) + " bps on " + escHtml(loseVenue));
     }
     if (reasons.length === 0) reasons.push("Higher overall weighted score");
 
@@ -922,12 +911,12 @@
     }
     html += '</div>';
 
-    html += '<div class="rv-why"><div class="rv-why-title">Why ' + winner + '?</div>' + reasonsHtml + '</div>';
+    html += '<div class="rv-why"><div class="rv-why-title">Why ' + escHtml(winner) + '?</div>' + reasonsHtml + '</div>';
 
     html += '<div class="rv-exec">' +
       '<div class="rv-exec-title">Estimated Execution</div>' +
       '<div class="rv-exec-grid">' +
-        '<div class="rv-exec-item"><span class="rv-exec-label">Venue</span><span class="rv-exec-val">' + winner + '</span></div>' +
+        '<div class="rv-exec-item"><span class="rv-exec-label">Venue</span><span class="rv-exec-val">' + escHtml(winner) + '</span></div>' +
         '<div class="rv-exec-item"><span class="rv-exec-label">Side</span><span class="rv-exec-val">BUY ' + side + '</span></div>' +
         '<div class="rv-exec-item"><span class="rv-exec-label">Cost/share</span><span class="rv-exec-val">$' + costWin.toFixed(4) + '</span></div>' +
         '<div class="rv-exec-item"><span class="rv-exec-label">Order size</span><span class="rv-exec-val">' + fmtK(size) + '</span></div>' +

@@ -174,19 +174,19 @@ func deduplicateByMarket(pairs []*MatchResult) []*MatchResult {
 	return out
 }
 
-// topPairsByJaccard scores every poly×kalshi combination by Jaccard title
+// topPairsByJaccard scores every marketA×marketB combination by Jaccard title
 // similarity and returns the top-k unique pairs (each market used at most once).
-func topPairsByJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket, k int) [][2]*models.CanonicalMarket {
+func topPairsByJaccard(marketsA, marketsB []*models.CanonicalMarket, k int) [][2]*models.CanonicalMarket {
 	type pair struct {
-		poly   *models.CanonicalMarket
-		kalshi *models.CanonicalMarket
-		sim    float64
+		marketA *models.CanonicalMarket
+		marketB *models.CanonicalMarket
+		sim     float64
 	}
 
 	var all []pair
-	for _, p := range polyMarkets {
-		for _, k := range kalshiMarkets {
-			all = append(all, pair{p, k, tokenJaccard(p.Title, k.Title)})
+	for _, a := range marketsA {
+		for _, b := range marketsB {
+			all = append(all, pair{a, b, tokenJaccard(a.Title, b.Title)})
 		}
 	}
 
@@ -198,19 +198,19 @@ func topPairsByJaccard(polyMarkets, kalshiMarkets []*models.CanonicalMarket, k i
 	}
 
 	// Take top-k, each market used once
-	usedPoly := map[string]bool{}
-	usedKalshi := map[string]bool{}
+	usedA := map[string]bool{}
+	usedB := map[string]bool{}
 	var result [][2]*models.CanonicalMarket
 	for _, pr := range all {
 		if len(result) >= k {
 			break
 		}
-		if usedPoly[pr.poly.VenueMarketID] || usedKalshi[pr.kalshi.VenueMarketID] {
+		if usedA[pr.marketA.VenueMarketID] || usedB[pr.marketB.VenueMarketID] {
 			continue
 		}
-		usedPoly[pr.poly.VenueMarketID] = true
-		usedKalshi[pr.kalshi.VenueMarketID] = true
-		result = append(result, [2]*models.CanonicalMarket{pr.poly, pr.kalshi})
+		usedA[pr.marketA.VenueMarketID] = true
+		usedB[pr.marketB.VenueMarketID] = true
+		result = append(result, [2]*models.CanonicalMarket{pr.marketA, pr.marketB})
 	}
 	return result
 }
@@ -269,11 +269,28 @@ func countRawPairs(searchResults []SearchResult) int {
 	return n
 }
 
-func addToVenueMap(m *models.CanonicalMarket, polyMap, kalshiMap map[string]*models.CanonicalMarket) {
-	switch m.VenueID {
-	case models.VenuePolymarket:
-		polyMap[m.VenueMarketID] = m
-	case models.VenueKalshi:
-		kalshiMap[m.VenueMarketID] = m
+// groupByVenue collects all unique markets from search results, grouped by VenueID.
+func groupByVenue(searchResults []SearchResult) map[models.VenueID][]*models.CanonicalMarket {
+	seen := map[models.VenueID]map[string]*models.CanonicalMarket{}
+	addMarket := func(m *models.CanonicalMarket) {
+		if _, ok := seen[m.VenueID]; !ok {
+			seen[m.VenueID] = map[string]*models.CanonicalMarket{}
+		}
+		seen[m.VenueID][m.VenueMarketID] = m
 	}
+	for _, sr := range searchResults {
+		addMarket(sr.Source)
+		for _, c := range sr.Candidates {
+			addMarket(c)
+		}
+	}
+	result := make(map[models.VenueID][]*models.CanonicalMarket, len(seen))
+	for vid, mm := range seen {
+		markets := make([]*models.CanonicalMarket, 0, len(mm))
+		for _, m := range mm {
+			markets = append(markets, m)
+		}
+		result[vid] = markets
+	}
+	return result
 }

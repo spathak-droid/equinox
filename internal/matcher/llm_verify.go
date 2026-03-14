@@ -198,36 +198,10 @@ func VerifyPairsWithLLM(ctx context.Context, cfg *config.Config, candidates []Se
 	return confirmed, nil
 }
 
-// cleanTitleForLLM normalizes venue-specific obfuscations so the LLM sees
-// clean, comparable titles. This is generic preprocessing — not hardcoded per-query.
+// cleanTitleForLLM performs generic title cleanup so the LLM sees clean,
+// comparable titles. Venue-specific normalizations (e.g. league name replacements)
+// belong in the normalizer package, not here.
 func cleanTitleForLLM(title string) string {
-	// Keep the " — " suffix — it contains the entity name (e.g., "— Mark Kelly").
-	// Only strip obfuscated affiliation labels like ":: Democratic".
-	if idx := strings.Index(title, " — ::"); idx >= 0 {
-		title = strings.TrimSpace(title[:idx])
-	}
-
-	// Kalshi obfuscates league names for licensing. Normalize them.
-	// This map is maintained once and covers all searches generically.
-	replacements := []struct{ from, to string }{
-		{"Pro Basketball", "NBA"},
-		{"Pro Football", "NFL"},
-		{"Pro Baseball", "MLB"},
-		{"Pro Hockey", "NHL"},
-		{"Pro Soccer", "MLS"},
-		{"Men's World Cup", "FIFA World Cup"},
-		{"Women's World Cup", "FIFA Women's World Cup"},
-		{"Pro Basketball Finals", "NBA Finals"},
-		{"Pro Basketball Championship", "NBA Finals"},
-		{"Pro Football Championship", "Super Bowl"},
-		{"Pro Baseball World Series", "World Series"},
-	}
-	for _, r := range replacements {
-		if strings.Contains(title, r.from) {
-			title = strings.ReplaceAll(title, r.from, r.to)
-		}
-	}
-
 	// Remove redundant "the" before country/team names: "Will the Brazil" → "Will Brazil"
 	title = strings.ReplaceAll(title, "the the ", "the ")
 	if strings.Contains(title, "Will the ") {

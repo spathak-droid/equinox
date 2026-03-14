@@ -26,15 +26,14 @@ import (
 	"github.com/equinox/internal/news"
 	"github.com/equinox/internal/normalizer"
 	"github.com/equinox/internal/router"
+	"github.com/equinox/internal/storage"
 	"github.com/equinox/internal/venues/kalshi"
 	"github.com/equinox/internal/venues/polymarket"
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
+	_ = godotenv.Load()
 	if err := run(); err != nil {
 		log.Fatalf("equinox: %v", err)
 	}
@@ -47,6 +46,9 @@ func run() error {
 	numMarkets := flag.Int("n", 10, "number of markets to fetch from each venue")
 	output := flag.String("output", "text", "output format: text or json")
 	newsFlag := flag.Bool("news", false, "fetch related news articles for matched pairs")
+	indexed := flag.Bool("indexed", false, "use SQLite index for matching (run cmd/indexer first)")
+	dbPath := flag.String("db", "equinox_markets.db", "path to SQLite database (with -indexed)")
+	topN := flag.Int("top-n", 5, "candidates per market from FTS search (with -indexed)")
 	flag.Parse()
 
 	orderSide := router.SideYes
@@ -69,65 +71,23 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	norm := normalizer.New(cfg)
-	polyClient := polymarket.New(cfg.HTTPTimeout, cfg.PolymarketSearchAPI, *numMarkets)
-	kalshiClient := kalshi.New(cfg.KalshiAPIKey, cfg.HTTPTimeout, cfg.KalshiSearchAPI, *numMarkets)
-
-	// ── 1. Fetch top N from each venue ──────────────────────────────────────
-	logf("[main] Fetching top %d markets from each venue...\n", *numMarkets)
-
-	polyRaw, err := polyClient.FetchMarkets(ctx)
-	if err != nil {
-		return fmt.Errorf("fetching polymarket: %w", err)
-	}
-	polyMarkets, err := norm.Normalize(ctx, polyRaw)
-	if err != nil {
-		return fmt.Errorf("normalizing polymarket: %w", err)
-	}
-	logf("[main] Polymarket: %d markets\n", len(polyMarkets))
-
-	kalshiRaw, err := kalshiClient.FetchMarkets(ctx)
-	if err != nil {
-		return fmt.Errorf("fetching kalshi: %w", err)
-	}
-	kalshiMarkets, err := norm.Normalize(ctx, kalshiRaw)
-	if err != nil {
-		return fmt.Errorf("normalizing kalshi: %w", err)
-	}
-	logf("[main] Kalshi: %d markets\n", len(kalshiMarkets))
-
-	// ── 2. Cross-search: Poly→Kalshi and Kalshi→Poly ────────────────────────
 	mtch := matcher.New(cfg)
-	pool := &matcher.CrossSearchWorkerPool{
-		Concurrency:         3,
-		DelayBetweenQueries: 200 * time.Millisecond,
+
+	var pairs []*matcher.MatchResult
+
+	if *indexed {
+		// ── Indexed mode: use SQLite database for matching ───────────────
+		pairs, err = runIndexedMatching(ctx, cfg, mtch, *dbPath, *topN, logf)
+		if err != nil {
+			return err
+		}
+	} else {
+		// ── Live mode: fetch from APIs and cross-search ─────────────────
+		pairs, err = runLiveMatching(ctx, cfg, mtch, *numMarkets, logf)
+		if err != nil {
+			return err
+		}
 	}
-
-	// Poly markets → search Kalshi
-	logf("\n[main] Searching Kalshi for each Polymarket market...\n")
-	polyToKalshi := pool.RunCrossSearch(ctx, polyMarkets, func(ctx context.Context, query string) ([]*models.CanonicalMarket, error) {
-		raw, err := kalshiClient.FetchMarketsByQuery(ctx, query)
-		if err != nil {
-			return nil, err
-		}
-		return norm.Normalize(ctx, raw)
-	}, 10)
-
-	// Kalshi markets → search Polymarket
-	logf("\n[main] Searching Polymarket for each Kalshi market...\n")
-	kalshiToPoly := pool.RunCrossSearch(ctx, kalshiMarkets, func(ctx context.Context, query string) ([]*models.CanonicalMarket, error) {
-		raw, err := polyClient.FetchMarketsByQuery(ctx, query)
-		if err != nil {
-			return nil, err
-		}
-		return norm.Normalize(ctx, raw)
-	}, 10)
-
-	// Combine search results from both directions
-	allResults := append(polyToKalshi, kalshiToPoly...)
-
-	// ── 3. Score and match ──────────────────────────────────────────────────
-	pairs := mtch.FindEquivalentPairsFromSearch(ctx, allResults, "")
 	logf("\n[main] Found %d equivalent pairs\n", len(pairs))
 
 	if len(pairs) == 0 {
@@ -322,6 +282,143 @@ func newJSONMarket(m *models.CanonicalMarket) marketSummary {
 		Title:         m.Title,
 		Resolution:    res,
 	}
+}
+
+// runIndexedMatching uses the SQLite index for FTS-based candidate discovery.
+// Much faster and more comprehensive than live API cross-search.
+func runIndexedMatching(_ context.Context, _ *config.Config, mtch *matcher.Matcher, dbPath string, topN int, logf func(string, ...any)) ([]*matcher.MatchResult, error) {
+	store, err := storage.NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening index: %w", err)
+	}
+	defer store.Close()
+
+	stats, _ := store.GetStats()
+	logf("[main] Using indexed mode: %d markets (%d polymarket, %d kalshi)\n",
+		stats.Total, stats.ByVenue["polymarket"], stats.ByVenue["kalshi"])
+
+	if stats.Total == 0 {
+		return nil, fmt.Errorf("index is empty — run `go run ./cmd/indexer` first")
+	}
+
+	// Load all Polymarket markets (lite — no raw_payload for memory efficiency)
+	polyMarkets, err := store.GetMarketsLite("polymarket")
+	if err != nil {
+		return nil, fmt.Errorf("loading polymarket markets: %w", err)
+	}
+	logf("[main] Loaded %d Polymarket markets from index\n", len(polyMarkets))
+
+	// For each Polymarket market, FTS search for Kalshi candidates
+	logf("[main] Searching index for cross-venue candidates (top-%d per market)...\n", topN)
+	var searchResults []matcher.SearchResult
+	searched := 0
+	for _, poly := range polyMarkets {
+		candidates, err := store.SearchByTitle(poly.Title, "polymarket", topN)
+		if err != nil {
+			continue
+		}
+		if len(candidates) > 0 {
+			searchResults = append(searchResults, matcher.SearchResult{
+				Source:     poly,
+				Candidates: candidates,
+			})
+		}
+		searched++
+		if searched%5000 == 0 {
+			logf("[main] Searched %d/%d markets, %d with candidates...\n",
+				searched, len(polyMarkets), len(searchResults))
+		}
+	}
+	logf("[main] FTS search complete: %d/%d markets have candidates\n",
+		len(searchResults), len(polyMarkets))
+
+	// Also search from top Kalshi markets (by volume) to find Polymarket matches
+	kalshiTopN := 2000
+	kalshiMarkets, err := store.GetTopMarketsLite("kalshi", kalshiTopN)
+	if err == nil && len(kalshiMarkets) > 0 {
+		logf("[main] Loaded %d Kalshi markets, searching for Polymarket candidates...\n", len(kalshiMarkets))
+		kalshiSearched := 0
+		for _, k := range kalshiMarkets {
+			candidates, err := store.SearchByTitle(k.Title, "kalshi", topN)
+			if err != nil {
+				continue
+			}
+			if len(candidates) > 0 {
+				searchResults = append(searchResults, matcher.SearchResult{
+					Source:     k,
+					Candidates: candidates,
+				})
+			}
+			kalshiSearched++
+			if kalshiSearched%500 == 0 {
+				logf("[main] Kalshi reverse-search: %d/%d done...\n", kalshiSearched, len(kalshiMarkets))
+			}
+		}
+		logf("[main] Also searched top %d Kalshi markets → total %d search results\n",
+			len(kalshiMarkets), len(searchResults))
+	}
+
+	// Run matcher on all candidates
+	pairs := mtch.FindMatchesFromSearchResults(searchResults, topN)
+	logf("[main] Found %d equivalent pairs\n", len(pairs))
+	return pairs, nil
+}
+
+// runLiveMatching fetches from live APIs and cross-searches (original behavior).
+func runLiveMatching(ctx context.Context, cfg *config.Config, mtch *matcher.Matcher, numMarkets int, logf func(string, ...any)) ([]*matcher.MatchResult, error) {
+	norm := normalizer.New(cfg)
+	polyClient := polymarket.New(cfg.HTTPTimeout, cfg.PolymarketSearchAPI, numMarkets)
+	kalshiClient := kalshi.New(cfg.KalshiAPIKey, cfg.HTTPTimeout, cfg.KalshiSearchAPI, numMarkets)
+
+	logf("[main] Fetching top %d markets from each venue...\n", numMarkets)
+
+	polyRaw, err := polyClient.FetchMarkets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetching polymarket: %w", err)
+	}
+	polyMarkets, err := norm.Normalize(ctx, polyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("normalizing polymarket: %w", err)
+	}
+	logf("[main] Polymarket: %d markets\n", len(polyMarkets))
+
+	kalshiRaw, err := kalshiClient.FetchMarkets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetching kalshi: %w", err)
+	}
+	kalshiMarkets, err := norm.Normalize(ctx, kalshiRaw)
+	if err != nil {
+		return nil, fmt.Errorf("normalizing kalshi: %w", err)
+	}
+	logf("[main] Kalshi: %d markets\n", len(kalshiMarkets))
+
+	pool := &matcher.CrossSearchWorkerPool{
+		Concurrency:         3,
+		DelayBetweenQueries: 200 * time.Millisecond,
+	}
+
+	logf("\n[main] Searching Kalshi for each Polymarket market...\n")
+	polyToKalshi := pool.RunCrossSearch(ctx, polyMarkets, func(ctx context.Context, query string) ([]*models.CanonicalMarket, error) {
+		raw, err := kalshiClient.FetchMarketsByQuery(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		return norm.Normalize(ctx, raw)
+	}, 10)
+
+	logf("\n[main] Searching Polymarket for each Kalshi market...\n")
+	kalshiToPoly := pool.RunCrossSearch(ctx, kalshiMarkets, func(ctx context.Context, query string) ([]*models.CanonicalMarket, error) {
+		raw, err := polyClient.FetchMarketsByQuery(ctx, query)
+		if err != nil {
+			return nil, err
+		}
+		return norm.Normalize(ctx, raw)
+	}, 10)
+
+	allResults := append(polyToKalshi, kalshiToPoly...)
+	pairs := mtch.FindEquivalentPairsFromSearch(ctx, allResults, "")
+	logf("[main] Found %d equivalent pairs\n", len(pairs))
+	return pairs, nil
 }
 
 func newJSONDecision(d *router.RoutingDecision) jsonRoutingDecision {

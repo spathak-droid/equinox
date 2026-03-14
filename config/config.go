@@ -54,6 +54,12 @@ type Config struct {
 	OpenAIAPIKey string
 	OpenAIModel  string
 
+	// Qdrant vector database
+	QdrantURL        string
+	QdrantAPIKey     string
+	QdrantCollection string
+	EmbeddingModel   string
+
 	// Fetch strategy: "category", "search", or "broad"
 	FetchStrategy string
 	// Markets per category when using category-bucketed fetch (default 50)
@@ -94,6 +100,11 @@ func Load() (*Config, error) {
 		NewsEnabled:     envBool("NEWS_ENABLED", false),
 		NewsMaxArticles: envInt("NEWS_MAX_ARTICLES", 5),
 
+		QdrantURL:        envString("QDRANT_URL", ""),
+		QdrantAPIKey:     os.Getenv("QDRANT_API_KEY"),
+		QdrantCollection: envString("QDRANT_COLLECTION", "equinox"),
+		EmbeddingModel:   envString("EMBEDDING_MODEL", "text-embedding-3-small"),
+
 		FetchStrategy:      envString("FETCH_STRATEGY", "category"),
 		MarketsPerCategory: envInt("MARKETS_PER_CATEGORY", 50),
 		FetchConcurrency:   envInt("FETCH_CONCURRENCY", 4),
@@ -107,6 +118,21 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if c.MatchThreshold < 0 || c.MatchThreshold > 1 {
+		return fmt.Errorf("MATCH_THRESHOLD must be between 0 and 1, got %f", c.MatchThreshold)
+	}
+	if c.ProbableMatchThreshold < 0 || c.ProbableMatchThreshold > 1 {
+		return fmt.Errorf("PROBABLE_MATCH_THRESHOLD must be between 0 and 1, got %f", c.ProbableMatchThreshold)
+	}
+	if c.MaxDateDeltaDays <= 0 {
+		return fmt.Errorf("MAX_DATE_DELTA_DAYS must be positive, got %d", c.MaxDateDeltaDays)
+	}
+	if c.HTTPTimeout <= 0 {
+		return fmt.Errorf("HTTP_TIMEOUT_SECONDS must be positive, got %d", c.HTTPTimeout)
+	}
+	if c.PriceWeight < 0 || c.LiquidityWeight < 0 || c.SpreadWeight < 0 {
+		return fmt.Errorf("routing weights must be non-negative")
+	}
 	total := c.PriceWeight + c.LiquidityWeight + c.SpreadWeight
 	if total < 0.99 || total > 1.01 {
 		return fmt.Errorf("routing weights must sum to 1.0, got %.2f", total)

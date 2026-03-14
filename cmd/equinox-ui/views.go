@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -193,16 +194,19 @@ func toMarketView(m *models.CanonicalMarket) MarketView {
 	if !m.UpdatedAt.IsZero() {
 		updatedAt = m.UpdatedAt.Format("2006-01-02 15:04:05")
 	}
+
+	title := fixKalshiDisplayTitle(m)
+
 	return MarketView{
 		Venue:              string(m.VenueID),
 		VenueMarketID:      m.VenueMarketID,
 		VenueYesTokenID:    m.VenueYesTokenID,
-		Title:              m.Title,
+		Title:              title,
 		Category:           m.Category,
 		Status:             string(m.Status),
 		Description:        m.Description,
 		Tags:               strings.Join(m.Tags, ", "),
-		ImageURL:           m.ImageURL,
+		ImageURL:           marketImageURL(m),
 		YesPrice:           m.YesPrice,
 		NoPrice:            m.NoPrice,
 		Liquidity:          m.Liquidity,
@@ -218,6 +222,67 @@ func toMarketView(m *models.CanonicalMarket) MarketView {
 		VenueSearchLink:    marketVenueSearchLink(m),
 		VenueSearchLinkAlt: marketVenueSearchLinkAlt(m),
 	}
+}
+
+// fixKalshiDisplayTitle repairs Kalshi titles that have "::" party/affiliation labels
+// instead of actual candidate/entity names (e.g. "Election winner? — :: Democratic").
+// It extracts the real name from raw_payload's rules_primary field.
+func fixKalshiDisplayTitle(m *models.CanonicalMarket) string {
+	if m.VenueID != models.VenueKalshi || !strings.Contains(m.Title, " — ::") {
+		return m.Title
+	}
+	// Parse raw payload to get rules_primary
+	if len(m.RawPayload) == 0 {
+		return m.Title
+	}
+	var raw struct {
+		RulesPrimary string `json:"rules_primary"`
+	}
+	if err := json.Unmarshal(m.RawPayload, &raw); err != nil {
+		return m.Title
+	}
+	entity := extractEntityFromKalshiRules(raw.RulesPrimary)
+	if entity == "" {
+		return m.Title
+	}
+	// Replace the ":: ..." suffix with the extracted entity name
+	if idx := strings.Index(m.Title, " — ::"); idx >= 0 {
+		return m.Title[:idx] + " — " + entity
+	}
+	return m.Title
+}
+
+// extractEntityFromKalshiRules pulls the entity name from "If <name> is/wins/..." patterns.
+func extractEntityFromKalshiRules(rules string) string {
+	if !strings.HasPrefix(rules, "If ") {
+		return ""
+	}
+	rest := rules[3:]
+	verbs := []string{" is ", " wins ", " receives ", " finishes ", " becomes ", " gets ", " has ", " does "}
+	bestIdx := -1
+	for _, v := range verbs {
+		idx := strings.Index(rest, v)
+		if idx > 0 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+		}
+	}
+	if bestIdx <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:bestIdx])
+}
+
+// kalshiDefaultIcon is used when Kalshi markets have no image from the API.
+const kalshiDefaultIcon = "https://kalshi-fallback-images.s3.amazonaws.com/structured_icons/diamond.webp"
+
+func marketImageURL(m *models.CanonicalMarket) string {
+	if m.ImageURL != "" {
+		return m.ImageURL
+	}
+	if m.VenueID == models.VenueKalshi {
+		return kalshiDefaultIcon
+	}
+	return ""
 }
 
 func marketVenueLink(m *models.CanonicalMarket) string {
@@ -266,6 +331,23 @@ func marketVenueKalshiLink(m *models.CanonicalMarket) string {
 	seriesTicker := strings.TrimSpace(strings.ToLower(m.VenueSeriesTicker))
 	eventTicker := strings.TrimSpace(strings.ToLower(m.VenueEventTicker))
 	eventTitle := strings.TrimSpace(m.VenueEventTitle)
+
+	// Derive series_ticker from event_ticker if missing.
+	// Kalshi pattern: event_ticker = series_ticker + "-" + suffix (e.g. KXOSCARPIC-26)
+	if seriesTicker == "" && eventTicker != "" {
+		if idx := strings.LastIndex(eventTicker, "-"); idx > 0 {
+			seriesTicker = eventTicker[:idx]
+		}
+	}
+
+	// Use event title for slug; fall back to market title stripped of " — subtitle"
+	if eventTitle == "" {
+		eventTitle = m.Title
+		if idx := strings.Index(eventTitle, " — "); idx >= 0 {
+			eventTitle = eventTitle[:idx]
+		}
+	}
+
 	if seriesTicker != "" && eventTicker != "" && eventTitle != "" {
 		slug := kalshiTitleSlug(eventTitle)
 		return "https://kalshi.com/markets/" + url.PathEscape(seriesTicker) + "/" + slug + "/" + url.PathEscape(eventTicker)
@@ -291,4 +373,55 @@ func kalshiTitleSlug(title string) string {
 		result = strings.ReplaceAll(result, "--", "-")
 	}
 	return strings.Trim(result, "-")
+}
+
+// isGarbageMarket returns true for markets that should be filtered from display:
+// combo/parlay titles, bracket outcomes, dead markets with 0% pricing, etc.
+func isGarbageMarket(m *models.CanonicalMarket) bool {
+	// Combo/parlay markets with "yes X, no Y" titles
+	if strings.HasPrefix(m.Title, "yes ") || strings.HasPrefix(m.Title, "no ") {
+		return true
+	}
+	// Very short/empty titles
+	if len(m.Title) < 5 {
+		return true
+	}
+	// Bracket/range outcome markets: "Bitcoin price range on Mar 20? — $63,000 to $63,999"
+	// These are individual slices of a multi-outcome market, not standalone questions.
+	if isBracketOutcome(m.Title) {
+		return true
+	}
+	return false
+}
+
+// isBracketOutcome detects Kalshi-style bracket markets where the title contains
+// " — " followed by a numeric range, dollar amount, or specific outcome label.
+// Examples:
+//   - "Bitcoin price range on Mar 20, 2026? — $63,000 to $63,999.99"
+//   - "Will the Philadelphia win the 2026 Pro Basketball Finals? — Philadelphia"
+//   - "Fed funds rate after March meeting? — 400 to 424.99"
+func isBracketOutcome(title string) bool {
+	idx := strings.Index(title, " — ")
+	if idx < 0 {
+		return false
+	}
+	suffix := strings.TrimSpace(title[idx+len(" — "):])
+	if len(suffix) == 0 {
+		return false
+	}
+	// If the suffix starts with $, a digit, or common range patterns → bracket
+	if suffix[0] == '$' {
+		return true
+	}
+	if suffix[0] >= '0' && suffix[0] <= '9' {
+		return true
+	}
+	// Suffix like "Yes", "No", "Under X", "Over X" → bracket outcome
+	suffixLower := strings.ToLower(suffix)
+	for _, prefix := range []string{"yes", "no", "under ", "over ", "above ", "below ", "more than", "less than", "at least", "fewer than"} {
+		if strings.HasPrefix(suffixLower, prefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -23,9 +23,9 @@ import (
 )
 
 const (
-	baseURL        = "https://gamma-api.polymarket.com"
-	pageSize       = 100
-	maxRespSize    = 10 * 1024 * 1024 // 10MB limit for venue API responses
+	baseURL     = "https://gamma-api.polymarket.com"
+	pageSize    = 500
+	maxRespSize = 10 * 1024 * 1024 // 10MB limit for venue API responses
 )
 
 // Client is a Polymarket Gamma API client.
@@ -58,11 +58,15 @@ func (c *Client) ID() models.VenueID {
 	return models.VenuePolymarket
 }
 
+// ─── FetchMarkets ───────────────────────────────────────────────────────────
+
 // FetchMarkets retrieves all active markets from Polymarket and paginates automatically.
 // Each market is returned as a RawMarket with the verbatim JSON payload.
 func (c *Client) FetchMarkets(ctx context.Context) ([]*venues.RawMarket, error) {
 	return c.fetchMarketsWithFilter(ctx, nil)
 }
+
+// ─── FetchMarketsByQuery ────────────────────────────────────────────────────
 
 // FetchMarketsByQuery retrieves markets using Polymarket's public-search endpoint.
 // No fallback — if public-search returns nothing, we return nothing.
@@ -94,17 +98,7 @@ func (c *Client) FetchMarketsByQueryPaged(ctx context.Context, query string, off
 	return markets, nextOffset, nil
 }
 
-// polymarketTagSlugs maps normalized category names to Polymarket tag slugs.
-var polymarketTagSlugs = map[string]string{
-	"politics":    "politics",
-	"crypto":      "crypto",
-	"economics":   "economics",
-	"sports":      "sports",
-	"science":     "science",
-	"technology":  "technology",
-	"entertainment": "entertainment",
-	"world":       "world",
-}
+// ─── FetchMarketsByCategory ─────────────────────────────────────────────────
 
 // FetchMarketsByCategory returns active markets for a given category using the
 // /events?tag_slug=... endpoint. Each event may contain multiple markets;
@@ -196,23 +190,7 @@ func (c *Client) FetchMarketsByCategoryWithLimit(ctx context.Context, category s
 	return result, nil
 }
 
-// injectImageIntoPayload merges an event-level image URL into a market JSON payload.
-// If imageURL is empty or merging fails, the original payload is returned unchanged.
-func injectImageIntoPayload(payload json.RawMessage, imageURL string) json.RawMessage {
-	if imageURL == "" {
-		return payload
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(payload, &m); err != nil {
-		return payload
-	}
-	m["image"] = imageURL
-	b, err := json.Marshal(m)
-	if err != nil {
-		return payload
-	}
-	return b
-}
+// ─── Keyword search ─────────────────────────────────────────────────────────
 
 // fetchMarketsByKeyword fetches active markets and filters client-side by keyword.
 // This is slower than public-search but catches markets that public-search misses
@@ -221,13 +199,12 @@ func (c *Client) fetchMarketsByKeyword(ctx context.Context, query string) ([]*ve
 	queryLower := strings.ToLower(query)
 	queryWords := strings.Fields(queryLower)
 
-	// Only scan up to 500 markets to avoid excessive API calls
 	scanLimit := 500
 	if c.maxMarkets > 0 && c.maxMarkets < scanLimit {
 		scanLimit = c.maxMarkets
 	}
 
-	matchLimit := 20 // max keyword-matched results to return
+	matchLimit := 20
 	if c.maxMarkets > 0 && c.maxMarkets < matchLimit {
 		matchLimit = c.maxMarkets
 	}
@@ -246,7 +223,6 @@ func (c *Client) fetchMarketsByKeyword(ctx context.Context, query string) ([]*ve
 			c.baseURL, batchSize, offset)
 
 		batch, err := c.fetchPage(ctx, u, func(m polymarketMarket) bool {
-			// Client-side keyword filter: check if question/description contains any query word
 			text := strings.ToLower(m.Question + " " + m.Description + " " + m.Category)
 			for _, w := range queryWords {
 				if len(w) > 2 && strings.Contains(text, w) {
@@ -257,13 +233,13 @@ func (c *Client) fetchMarketsByKeyword(ctx context.Context, query string) ([]*ve
 		})
 		if err != nil {
 			if len(matched) > 0 {
-				break // return partial results
+				break
 			}
 			return nil, err
 		}
 		matched = append(matched, batch...)
 		if len(batch) == 0 || len(batch) < batchSize {
-			break // last page or empty
+			break
 		}
 		offset += pageSize
 	}
@@ -274,6 +250,8 @@ func (c *Client) fetchMarketsByKeyword(ctx context.Context, query string) ([]*ve
 	fmt.Printf("[polymarket] Keyword filter for %q: scanned %d, matched %d\n", query, offset+pageSize, len(matched))
 	return matched, nil
 }
+
+// ─── Internal fetch helpers ─────────────────────────────────────────────────
 
 func (c *Client) fetchMarketsWithFilter(ctx context.Context, keep func(polymarketMarket) bool) ([]*venues.RawMarket, error) {
 	var all []*venues.RawMarket
@@ -296,7 +274,6 @@ func (c *Client) fetchMarketsWithFilter(ctx context.Context, keep func(polymarke
 
 		batch, err := c.fetchPage(ctx, url, keep)
 		if err != nil {
-			// If we already have data, log warning and return partial results
 			if len(all) > 0 {
 				fmt.Printf("[polymarket] WARNING: pagination stopped after %d markets: %v\n", len(all), err)
 				break
@@ -308,7 +285,7 @@ func (c *Client) fetchMarketsWithFilter(ctx context.Context, keep func(polymarke
 		}
 		all = append(all, batch...)
 		if len(batch) < limit {
-			break // last page
+			break
 		}
 		if len(all)%500 == 0 {
 			fmt.Printf("[polymarket] Fetched %d markets so far...\n", len(all))
@@ -317,24 +294,6 @@ func (c *Client) fetchMarketsWithFilter(ctx context.Context, keep func(polymarke
 	}
 
 	return all, nil
-}
-
-// polymarketMarket is the raw shape returned by Polymarket's Gamma API.
-// Only fields we use downstream are defined here; the full payload is retained as RawPayload.
-type polymarketMarket struct {
-	ID              string  `json:"id"`
-	Question        string  `json:"question"`
-	Description     string  `json:"description"`
-	EndDateISO      string  `json:"endDateIso"`
-	Active          bool    `json:"active"`
-	Closed          bool    `json:"closed"`
-	OutcomePrices   string  `json:"outcomePrices"` // JSON array string e.g. "[\"0.62\", \"0.38\"]"
-	Volume          string  `json:"volume"`    // API returns string
-	Liquidity       string  `json:"liquidity"` // API returns string
-	Category        string  `json:"category"`
-	Tags            []struct {
-		Label string `json:"label"`
-	} `json:"tags"`
 }
 
 func (c *Client) fetchPage(ctx context.Context, url string, keep func(polymarketMarket) bool) ([]*venues.RawMarket, error) {
@@ -368,9 +327,6 @@ func (c *Client) fetchPage(ctx context.Context, url string, keep func(polymarket
 	for _, item := range raw {
 		var m polymarketMarket
 		if err := json.Unmarshal(item, &m); err != nil {
-			// Log and skip malformed records rather than failing the entire fetch.
-			// Assumption: partial data is preferable to a complete failure when
-			// one malformed record is returned by the venue.
 			fmt.Printf("[polymarket] WARNING: skipping malformed market: %v\n", err)
 			continue
 		}
@@ -390,34 +346,7 @@ func (c *Client) fetchPage(ctx context.Context, url string, keep func(polymarket
 	return result, nil
 }
 
-// publicSearchResponse matches the actual Polymarket public-search API response.
-type publicSearchResponse struct {
-	Events []publicSearchEvent `json:"events"`
-}
-
-type publicSearchEvent struct {
-	Title   string               `json:"title"`
-	Slug    string               `json:"slug"`
-	EndDate string               `json:"endDate"`
-	Image   string               `json:"image"`
-	Active  bool                 `json:"active"`
-	Closed  bool                 `json:"closed"`
-	Markets []publicSearchMarket `json:"markets"`
-}
-
-type publicSearchMarket struct {
-	Question       string   `json:"question"`
-	Slug           string   `json:"slug"`
-	Active         bool     `json:"active"`
-	Closed         bool     `json:"closed"`
-	BestBid        float64  `json:"bestBid"`
-	BestAsk        float64  `json:"bestAsk"`
-	LastTradePrice float64  `json:"lastTradePrice"`
-	Spread         float64  `json:"spread"`
-	OutcomePrices  []string `json:"outcomePrices"` // actual array: ["0.935","0.065"]
-	Outcomes       []string `json:"outcomes"`      // ["Yes","No"]
-	GroupItemTitle string   `json:"groupItemTitle"`
-}
+// ─── Public search ──────────────────────────────────────────────────────────
 
 func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*venues.RawMarket, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
@@ -446,7 +375,6 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		return nil, fmt.Errorf("unmarshalling public-search response: %w", err)
 	}
 
-	// Collect slugs and search-level data from public-search results.
 	var entries []searchEntry
 	seen := map[string]struct{}{}
 
@@ -476,7 +404,6 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		}
 	}
 
-	// Enrich with full market data (liquidity, volume) via batch slug lookup.
 	slugToFull := c.fetchFullBySlug(ctx, entries)
 
 	var result []*venues.RawMarket
@@ -484,7 +411,6 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 		mkt := e.mkt
 		ev := e.ev
 
-		// Convert outcomePrices array to JSON string for normalizer compatibility
 		outcomePricesStr := ""
 		if len(mkt.OutcomePrices) > 0 {
 			b, _ := json.Marshal(mkt.OutcomePrices)
@@ -508,7 +434,6 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 			"event_slug":     ev.Slug,
 		}
 
-		// Overlay fields from full market data if available.
 		if full, ok := slugToFull[mkt.Slug]; ok {
 			payload["liquidityNum"] = full.LiquidityNum
 			payload["volume24hr"] = full.Volume24hr
@@ -545,9 +470,9 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 			break
 		}
 		var p struct {
-			Question    string  `json:"question"`
-			BestBid     float64 `json:"bestBid"`
-			BestAsk     float64 `json:"bestAsk"`
+			Question     string  `json:"question"`
+			BestBid      float64 `json:"bestBid"`
+			BestAsk      float64 `json:"bestAsk"`
 			LiquidityNum float64 `json:"liquidityNum"`
 		}
 		json.Unmarshal(r.Payload, &p)
@@ -556,26 +481,8 @@ func (c *Client) fetchPublicSearch(ctx context.Context, searchURL string) ([]*ve
 	return result, nil
 }
 
-// searchEntry pairs a public-search market with its parent event metadata.
-type searchEntry struct {
-	mkt publicSearchMarket
-	ev  publicSearchEvent
-}
-
-// fullMarketData holds fields we enrich from /markets?slug=...
-type fullMarketData struct {
-	LiquidityNum float64 `json:"liquidityNum"`
-	Volume24hr   float64 `json:"volume24hr"`
-	ClobTokenIDs string  `json:"clobTokenIds"`
-	Description  string  `json:"description"`
-	Category     string  `json:"category"`
-	Tags         []struct {
-		Label string `json:"label"`
-	} `json:"tags"`
-}
-
 // fetchFullBySlug does a single batch GET /markets?slug=...&slug=... and returns
-// a map of slug → financial data. On any error it returns an empty map so the
+// a map of slug to financial data. On any error it returns an empty map so the
 // caller continues with zero-valued liquidity/volume.
 func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map[string]fullMarketData {
 	result := make(map[string]fullMarketData, len(entries))
@@ -612,6 +519,7 @@ func (c *Client) fetchFullBySlug(ctx context.Context, entries []searchEntry) map
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespSize))
 	if err != nil {
+		fmt.Printf("[polymarket] warning: reading enrichment response: %v\n", err)
 		return result
 	}
 

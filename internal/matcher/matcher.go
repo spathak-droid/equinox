@@ -42,6 +42,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/equinox/config"
@@ -148,11 +149,9 @@ func (m *Matcher) FindEquivalentPairs(ctx context.Context, markets []*models.Can
 	}
 
 	// Sort by composite score descending
-	for i := 1; i < len(confirmed); i++ {
-		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
-			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
-		}
-	}
+	sort.Slice(confirmed, func(i, j int) bool {
+		return confirmed[i].CompositeScore > confirmed[j].CompositeScore
+	})
 
 	return confirmed
 }
@@ -176,11 +175,9 @@ func (m *Matcher) TopRejectedPairs(markets []*models.CanonicalMarket, limit int)
 			}
 		}
 	}
-	for i := 1; i < len(rejected); i++ {
-		for j := i; j > 0 && rejected[j].CompositeScore > rejected[j-1].CompositeScore; j-- {
-			rejected[j], rejected[j-1] = rejected[j-1], rejected[j]
-		}
-	}
+	sort.Slice(rejected, func(i, j int) bool {
+		return rejected[i].CompositeScore > rejected[j].CompositeScore
+	})
 	if len(rejected) > limit {
 		rejected = rejected[:limit]
 	}
@@ -205,16 +202,19 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 	sigA := ExtractEventSignature(a.Title)
 	sigB := ExtractEventSignature(b.Title)
 
-	// Populate semantic signatures on the canonical markets for downstream use
+	// Compute semantic signatures into local variables to avoid mutating shared inputs
+	// (the same CanonicalMarket pointer may be compared concurrently in multiple goroutines).
+	localSigA := ""
 	if csA := sigA.CanonicalSignature(); csA != "" {
-		a.SemanticSignature = csA
+		localSigA = csA
 	}
+	localSigB := ""
 	if csB := sigB.CanonicalSignature(); csB != "" {
-		b.SemanticSignature = csB
+		localSigB = csB
 	}
 
-	if a.SemanticSignature != "" && b.SemanticSignature != "" &&
-		a.SemanticSignature == b.SemanticSignature {
+	if localSigA != "" && localSigB != "" &&
+		localSigA == localSigB {
 		result.SignatureMatch = true
 		result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
 		result.EventMatchScore = 1.0
@@ -239,7 +239,7 @@ func (m *Matcher) compare(a, b *models.CanonicalMarket) *MatchResult {
 
 		result.Explanation = fmt.Sprintf(
 			"Stage 0 signature match: sig=%s (entities=%v, threshold=%s, comparator=%s, date=%s)%s",
-			a.SemanticSignature, sigA.Entities, sigA.Threshold, sigA.Comparator, sigA.DateRef, dateSuffix)
+			localSigA, sigA.Entities, sigA.Threshold, sigA.Comparator, sigA.DateRef, dateSuffix)
 		return result
 	}
 
@@ -376,6 +376,119 @@ func (m *Matcher) passesHardFilters(a, b *models.CanonicalMarket, result *MatchR
 	}
 
 	return true
+}
+
+// compareLight runs a scoring-only pipeline without the aggressive semantic gates.
+// This is designed for Qdrant-sourced pairs where vector similarity has already
+// established semantic relevance — the hard semantic gates (signature compatibility,
+// disjoint entities, action verb mismatch) are too aggressive for these pre-filtered pairs.
+func (m *Matcher) compareLight(a, b *models.CanonicalMarket) *MatchResult {
+	result := &MatchResult{
+		MarketA:             a,
+		MarketB:             b,
+		EntityOverlapScore:  -1,
+		DateProximityScore:  -1,
+		PriceProximityScore: -1,
+	}
+
+	// Stage 0: Signature exact-match (still valuable — free instant confirmation)
+	sigA := ExtractEventSignature(a.Title)
+	sigB := ExtractEventSignature(b.Title)
+
+	// Compute semantic signatures into local variables to avoid mutating shared inputs
+	// (the same CanonicalMarket pointer may be compared concurrently in multiple goroutines).
+	localSigA := ""
+	if csA := sigA.CanonicalSignature(); csA != "" {
+		localSigA = csA
+	}
+	localSigB := ""
+	if csB := sigB.CanonicalSignature(); csB != "" {
+		localSigB = csB
+	}
+
+	if localSigA != "" && localSigB != "" &&
+		localSigA == localSigB {
+		result.SignatureMatch = true
+		result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
+		result.EventMatchScore = 1.0
+		result.DatePenalty = m.datePenalty(a, b)
+		result.CompositeScore = 1.0 * (1.0 - result.DatePenalty)
+		if result.CompositeScore >= m.cfg.MatchThreshold {
+			result.Confidence = ConfidenceMatch
+		} else {
+			result.Confidence = ConfidenceProbable
+		}
+		result.Explanation = fmt.Sprintf("Signature match (light): sig=%s", localSigA)
+		return result
+	}
+
+	// Only check status — Qdrant already filtered by relevance.
+	if a.Status != models.StatusActive || b.Status != models.StatusActive {
+		result.Confidence = ConfidenceNoMatch
+		result.Explanation = "skipped: one or both markets are not active"
+		return result
+	}
+
+	// Intent gate: reject pairs that share entities but ask different questions.
+	// This is the key guard against false positives from vector search.
+	// E.g., "Mexico win World Cup" vs "World Cup game played in Mexico"
+	actA := extractAction(strings.ToLower(a.Title))
+	actB := extractAction(strings.ToLower(b.Title))
+	if actionsIncompatible(actA, actB) {
+		result.Confidence = ConfidenceNoMatch
+		result.Explanation = fmt.Sprintf("Intent mismatch: %q (%s) vs %q (%s)",
+			actA, actionIntentGroups[actA], actB, actionIntentGroups[actB])
+		return result
+	}
+
+	// Stage 2: Fuzzy title match
+	result.FuzzyScore = fuzzyTitleScore(a.Title, b.Title)
+	result.EventMatchScore = EventMatchScore(sigA, sigB)
+
+	// Stage 3: Multi-signal composite scoring
+	result.EntityOverlapScore = entityOverlapScore(a.Title, b.Title)
+	result.DateProximityScore = dateProximityScore(a, b, m.cfg.MaxDateDeltaDays)
+	result.PriceProximityScore = priceProximityScore(a, b)
+	catBonus := categoryBonus(a, b)
+
+	result.CompositeScore = 0.30*result.FuzzyScore +
+		0.25*result.EventMatchScore +
+		0.15*result.EntityOverlapScore +
+		0.12*result.DateProximityScore +
+		0.08*result.PriceProximityScore +
+		0.10*catBonus
+
+	// Apply date penalty as soft multiplier
+	result.DatePenalty = m.datePenalty(a, b)
+	if result.DatePenalty > 0 {
+		result.CompositeScore *= (1.0 - result.DatePenalty)
+	}
+
+	// Low fuzzy floor: when titles barely overlap textually, cap the score
+	// to prevent entity/date/price signals from inflating unrelated pairs.
+	if result.FuzzyScore < 0.40 {
+		cap := m.cfg.ProbableMatchThreshold * 0.8
+		if result.CompositeScore > cap {
+			result.CompositeScore = cap
+		}
+	}
+
+	// Classification
+	switch {
+	case result.CompositeScore >= m.cfg.MatchThreshold:
+		result.Confidence = ConfidenceMatch
+	case result.CompositeScore >= m.cfg.ProbableMatchThreshold:
+		result.Confidence = ConfidenceProbable
+	default:
+		result.Confidence = ConfidenceNoMatch
+	}
+
+	result.Explanation = fmt.Sprintf(
+		"Semantic compare: fuzzy=%.2f, event=%.2f, entity=%.2f, date=%.2f, price=%.2f, composite=%.2f, actions=%s/%s",
+		result.FuzzyScore, result.EventMatchScore, result.EntityOverlapScore,
+		result.DateProximityScore, result.PriceProximityScore, result.CompositeScore, actA, actB)
+
+	return result
 }
 
 // datePenalty returns a [0.0, 1.0] penalty based on how far apart two markets'

@@ -7,9 +7,12 @@
 <link rel="icon" type="image/svg+xml" href="/static/logo-icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
 <link rel="stylesheet" href="/static/styles.css">
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript>
+  <link href="https://fonts.googleapis.com/css2?family=Delius&display=swap" rel="stylesheet">
+</noscript>
 </head>
 <body>
 
@@ -26,7 +29,7 @@
       <span class="logo-text">EQUINOX</span>
     </a>
     <form class="search-form" method="GET" action="/">
-      <input class="search-input" type="text" name="q" value="{{.SearchQuery}}" placeholder="Search markets across venues..." autofocus>
+      <input class="search-input" type="text" name="q" value="{{.SearchQuery}}" placeholder="Search markets across venues..." autofocus data-search-query="{{.SearchQuery}}">
       <button class="search-btn" type="submit">Search</button>
     </form>
     {{end}}
@@ -54,12 +57,34 @@
   </div>
 </div>
 
-{{else if not .Pairs}}
-<!-- No results -->
+{{else if .LiveSearchPending}}
+<!-- No index available, auto-trigger SSE search -->
+<div class="empty-state">
+  <div class="empty-icon material-icons-round">sync</div>
+  <div class="empty-title">Searching live APIs...</div>
+  <div class="empty-sub">No local index available. Fetching results from Polymarket and Kalshi.</div>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  if (typeof startStreamSearch === "function") {
+    var searchQuery = document.querySelector('[data-search-query]').dataset.searchQuery;
+    startStreamSearch(searchQuery, false);
+  }
+});
+</script>
+
+{{else if and (not .Pairs) (not .UnpairedMarkets)}}
+<!-- No results at all -->
 <div class="empty-state">
   <div class="empty-icon material-icons-round">search_off</div>
-  <div class="empty-title">No equivalent pairs found</div>
-  {{if .DiagnosisMessage}}
+  <div class="empty-title">No markets found</div>
+  {{if .IndexSearch}}
+  <div class="empty-sub">No matches in the local index. Try searching live APIs for the latest data.</div>
+  <button class="live-search-btn" onclick="startStreamSearch(document.querySelector('[data-search-query]').dataset.searchQuery, false)">
+    <span class="material-icons-round" style="font-size:16px;">cell_tower</span>
+    Search Live APIs
+  </button>
+  {{else if .DiagnosisMessage}}
   <div class="diagnosis">
     <div class="diagnosis-box">
       <div class="diagnosis-label">Why no matches?</div>
@@ -74,12 +99,14 @@
 {{else}}
 <!-- Results -->
 <div class="results-header">
-  <div class="results-title">Results for <strong>"{{.SearchQuery}}"</strong></div>
+  <div class="results-title">{{if .BrowseMode}}{{if .SearchQuery}}Index search: <strong>"{{.SearchQuery}}"</strong>{{else}}<strong>Top Cross-Venue Matches</strong> <span style="font-weight:400;color:var(--text-muted);font-size:0.85rem;">from {{if .IndexStats}}{{.IndexStats.Total}}{{end}} indexed markets</span>{{end}}{{else if .IndexSearch}}Results for <strong>"{{.SearchQuery}}"</strong>{{else}}Results for <strong>"{{.SearchQuery}}"</strong>{{end}}</div>
+  {{if .IndexSearch}}<span class="result-badge badge-index">from index</span>{{end}}
   {{range $venue, $count := .VenueCounts}}
   <span class="result-badge badge-venue">{{$venue}}: {{$count}}</span>
   {{end}}
   {{if .MatchCount}}<span class="result-badge badge-match">{{.MatchCount}} matched</span>{{end}}
   {{if .ProbableCount}}<span class="result-badge badge-probable">{{.ProbableCount}} probable</span>{{end}}
+  {{if .IndexSearch}}<button class="live-search-btn" onclick="startStreamSearch(document.querySelector('[data-search-query]').dataset.searchQuery, false)"><span class="material-icons-round" style="font-size:14px;">cell_tower</span> Search Live</button>{{end}}
 </div>
 
 {{range $i, $p := .Pairs}}
@@ -121,6 +148,7 @@
         {{if $p.MarketA.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketA.ImageURL}}" alt="" loading="lazy">{{end}}
         <div class="venue-dot vd-{{$p.MarketA.Venue}}">{{venueIcon $p.MarketA.Venue}}</div>
         <div class="mkt-title">{{$p.MarketA.Title}}</div>
+        {{if $p.MarketA.VenueLink}}<a class="mkt-venue-link" href="{{$p.MarketA.VenueLink}}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open on {{$p.MarketA.Venue}}"><span class="material-icons-round">open_in_new</span></a>{{end}}
       </div>
       <div class="mkt-stats">
         <span class="mkt-price" data-venue="{{$p.MarketA.Venue}}" data-market-id="{{$p.MarketA.VenueMarketID}}" data-token-id="{{$p.MarketA.VenueYesTokenID}}"><span class="price-yes">{{pct $p.MarketA.YesPrice}}</span> <span class="price-no">{{pct $p.MarketA.NoPrice}}</span></span>
@@ -146,6 +174,7 @@
         {{if $p.MarketB.ImageURL}}<img class="mkt-thumb" src="{{$p.MarketB.ImageURL}}" alt="" loading="lazy">{{end}}
         <div class="venue-dot vd-{{$p.MarketB.Venue}}">{{venueIcon $p.MarketB.Venue}}</div>
         <div class="mkt-title">{{$p.MarketB.Title}}</div>
+        {{if $p.MarketB.VenueLink}}<a class="mkt-venue-link" href="{{$p.MarketB.VenueLink}}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open on {{$p.MarketB.Venue}}"><span class="material-icons-round">open_in_new</span></a>{{end}}
       </div>
       <div class="mkt-stats">
         <span class="mkt-price" data-venue="{{$p.MarketB.Venue}}" data-market-id="{{$p.MarketB.VenueMarketID}}" data-token-id="{{$p.MarketB.VenueYesTokenID}}"><span class="price-yes">{{pct $p.MarketB.YesPrice}}</span> <span class="price-no">{{pct $p.MarketB.NoPrice}}</span></span>
@@ -156,32 +185,32 @@
       </div>
     </div>
   </div>
-  {{if $p.NewsQuery}}
-  <div class="pair-news" data-news-query="{{$p.NewsQuery}}">
-    <div class="pair-news-header">
-      <span class="material-icons-round pair-news-icon">newspaper</span>
-      <span class="pair-news-title">Related News</span>
-    </div>
-    <ul class="news-list">
-      {{if $p.NewsArticles}}{{range $p.NewsArticles}}
-      <li class="news-item">
-        <div class="news-item-header">
-          <span class="news-item-title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></span>
-          <span class="news-item-meta">{{if .Source}}<span class="news-item-source">{{.Source}}</span>{{end}}{{if .Age}} · <span class="news-item-age">{{.Age}}</span>{{end}}</span>
-        </div>
-      </li>
-      {{end}}{{else}}
-      <li class="news-item" style="color:var(--text-muted);font-size:0.73rem;">Loading news...</li>
-      {{end}}
-    </ul>
-    <button class="news-see-more" onclick="loadMoreNews(this)">
-      <span class="material-icons-round" style="font-size:14px;vertical-align:middle;">add</span> See more
-    </button>
-  </div>
-  {{end}}
   <div class="pair-explain" id="explain-{{$i}}">
     <div class="pair-explain-inner">
-      <div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div>{{$p.Explanation}}</div>
+      {{if $p.NewsQuery}}
+      <div class="pair-news" data-news-query="{{$p.NewsQuery}}">
+        <div class="pair-news-header">
+          <span class="material-icons-round pair-news-icon">newspaper</span>
+          <span class="pair-news-title">Related News</span>
+        </div>
+        <ul class="news-list">
+          {{if $p.NewsArticles}}{{range $p.NewsArticles}}
+          <li class="news-item">
+            <div class="news-item-header">
+              <span class="news-item-title"><a href="{{.URL}}" target="_blank" rel="noopener">{{.Title}}</a></span>
+              <span class="news-item-meta">{{if .Source}}<span class="news-item-source">{{.Source}}</span>{{end}}{{if .Age}} · <span class="news-item-age">{{.Age}}</span>{{end}}</span>
+            </div>
+          </li>
+          {{end}}{{else}}
+          <li class="news-item" style="color:var(--text-muted);font-size:0.73rem;">Loading news...</li>
+          {{end}}
+        </ul>
+        <button class="news-see-more" onclick="loadMoreNews(this)">
+          <span class="material-icons-round" style="font-size:14px;vertical-align:middle;">add</span> See more
+        </button>
+      </div>
+      {{end}}
+      <div class="pair-explain-section"><div class="pair-explain-label">Match reasoning</div><span class="pair-explain-text">{{$p.Explanation}}</span></div>
       <div class="pair-explain-section">
         <div class="pair-explain-label">Routing decision</div>
         <div class="route-form" data-pair-idx="{{$i}}"
@@ -214,6 +243,40 @@
   </div>
 </div>
 {{end}}
+
+{{if .UnpairedMarkets}}
+<div class="unpaired-section">
+  <div class="unpaired-header">
+    <span class="material-icons-round" style="font-size:18px;vertical-align:middle;margin-right:6px;">view_list</span>
+    Other relevant markets ({{len .UnpairedMarkets}})
+  </div>
+  <div class="unpaired-grid">
+    {{range .UnpairedMarkets}}
+    <div class="unpaired-card"
+         onclick="openMarketModal(this)"
+         data-venue="{{.Venue}}" data-market-id="{{.VenueMarketID}}" data-title="{{.Title}}"
+         data-description="{{.Description}}" data-category="{{.Category}}" data-tags="{{.Tags}}"
+         data-resolution-criteria="" data-venue-link="{{.VenueLink}}"
+         data-venue-search-link="{{.VenueSearchLink}}" data-venue-search-link-alt="{{.VenueSearchLinkAlt}}"
+         data-image-url="{{.ImageURL}}"
+         data-yes-price="{{printf "%.4f" .YesPrice}}" data-no-price="{{printf "%.4f" .NoPrice}}"
+         data-liquidity="{{printf "%.2f" .Liquidity}}" data-spread="{{printf "%.6f" .Spread}}"
+         data-volume-24h="{{printf "%.2f" .Volume24h}}" data-open-interest="{{printf "%.2f" .OpenInterest}}"
+         data-resolution-date="{{.ResolutionDate}}" data-created-at="{{.CreatedAt}}" data-updated-at="{{.UpdatedAt}}"
+         data-token-id="{{.VenueYesTokenID}}">
+      {{if .ImageURL}}<img class="unpaired-thumb" src="{{.ImageURL}}" alt="" loading="lazy">{{end}}
+      <div class="unpaired-info">
+        <div class="unpaired-venue-badge venue-{{.Venue}}">{{.Venue}}</div>
+        <div class="unpaired-title">{{.Title}}</div>
+        <span class="unpaired-price"><span class="price-yes">{{pct .YesPrice}}</span> <span class="price-no">{{pct .NoPrice}}</span></span>
+      </div>
+      {{if .VenueLink}}<a class="mkt-venue-link unpaired-venue-link" href="{{.VenueLink}}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open on {{.Venue}}"><span class="material-icons-round">open_in_new</span></a>{{end}}
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
 {{end}}
 
 </div>
@@ -290,6 +353,28 @@
   </div>
 </div>
 
+<!-- Search loading overlay -->
+<div id="searchLoadingOverlay" class="search-loading-overlay" style="display:none;">
+  <div class="search-loading-content">
+    <span class="material-icons-round spin" style="font-size:28px;color:var(--accent);">sync</span>
+    <div class="search-loading-text">Searching markets...</div>
+  </div>
+</div>
+<script>
+(function(){
+  var overlay = document.getElementById("searchLoadingOverlay");
+  function showLoader(){overlay.style.display="flex";}
+  document.querySelectorAll(".search-form, .hero-form").forEach(function(f){
+    f.addEventListener("submit",function(){
+      var q = f.querySelector("input[name=q]");
+      if(q && q.value.trim()) showLoader();
+    });
+  });
+  document.querySelectorAll(".hero-hint").forEach(function(a){
+    a.addEventListener("click",function(){showLoader();});
+  });
+})();
+</script>
 <script src="/static/app.js"></script>
 </body>
 </html>

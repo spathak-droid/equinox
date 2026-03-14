@@ -29,16 +29,30 @@ type progressEvent struct {
 	Index int       `json:"index,omitempty"` // pair index (1-based)
 }
 
+// IndexStats holds index metadata for display.
+type IndexStats struct {
+	Total      int       `json:"total"`
+	Polymarket int       `json:"polymarket"`
+	Kalshi     int       `json:"kalshi"`
+	LastUpdate time.Time `json:"last_update"`
+}
+
 // PageData is passed to the HTML template.
 type PageData struct {
 	SearchQuery      string
 	Pairs            []PairView
+	UnpairedMarkets  []MarketView // markets that didn't match cross-venue
 	VenueCounts      map[models.VenueID]int
 	MatchCount       int
 	ProbableCount    int
 	DiagnosisMessage string
 	HasQuery         bool
 	DeepSearch       bool
+	BrowseMode        bool
+	IndexSearch       bool   // results came from index, show "Search Live" button
+	LiveSearchPending bool   // no index available, auto-trigger SSE on page load
+	IndexStats        *IndexStats
+	IndexLoading      bool   // DB still initializing, show loader
 }
 
 // NewsArticleView is a single news article ready for rendering.

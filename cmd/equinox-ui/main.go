@@ -9,26 +9,35 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
-	"github.com/equinox/internal/news"
+	"github.com/equinox/internal/storage"
 	"github.com/equinox/internal/venues/kalshi"
 	"github.com/equinox/internal/venues/polymarket"
 	"github.com/joho/godotenv"
 )
 
+// browseCache caches the result of runIndexedBrowse when query=="" (browse all)
+// so repeated requests don't re-compute matching. TTL is 5 minutes.
+var browseCache struct {
+	sync.Mutex
+	data      *PageData
+	expiresAt time.Time
+}
+
 func main() {
-	// .env is optional — Railway (and other cloud hosts) inject vars directly.
+	// .env is optional -- Railway (and other cloud hosts) inject vars directly.
 	_ = godotenv.Load()
 	cfg, err := config.Load()
 	if err != nil {
@@ -41,6 +50,33 @@ func main() {
 	kalshiClient := kalshi.New(cfg.KalshiAPIKey, cfg.HTTPTimeout, cfg.KalshiSearchAPI)
 	polyClient := polymarket.New(cfg.HTTPTimeout, cfg.PolymarketSearchAPI, uiPerVenueLimit)
 
+	// Open SQLite index in background (optional -- enables /browse and /api/pairs).
+	dbPath := os.Getenv("EQUINOX_DB")
+	if dbPath == "" {
+		dbPath = "equinox_markets_v2.db"
+	}
+	var store atomic.Pointer[storage.Store]
+	go func() {
+		s, err := storage.NewStore(dbPath)
+		if err != nil {
+			fmt.Printf("[equinox-ui] WARNING: no index DB at %s: %v (browse disabled)\n", dbPath, err)
+			return
+		}
+		store.Store(s)
+		stats, _ := s.GetStats()
+		fmt.Printf("[equinox-ui] Index loaded: %d markets (%d polymarket, %d kalshi)\n",
+			stats.Total, stats.ByVenue["polymarket"], stats.ByVenue["kalshi"])
+	}()
+
+	// Set up Qdrant + embedding clients for semantic search (optional).
+	var qdrant *storage.QdrantClient
+	var embedder *storage.EmbeddingClient
+	if cfg.QdrantURL != "" && cfg.OpenAIAPIKey != "" {
+		qdrant = storage.NewQdrantClient(cfg.QdrantURL, cfg.QdrantAPIKey, cfg.QdrantCollection)
+		embedder = storage.NewEmbeddingClient(cfg.OpenAIAPIKey, cfg.EmbeddingModel)
+		fmt.Printf("[equinox-ui] Qdrant semantic search enabled (%s)\n", cfg.QdrantURL)
+	}
+
 	fmt.Println("[equinox-ui] Serving at http://localhost:8080")
 
 	// Serve embedded static assets (CSS, JS).
@@ -48,55 +84,148 @@ func main() {
 	if err != nil {
 		log.Fatalf("loading static assets: %v", err)
 	}
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
+	http.Handle("/static/", securityHeaders(http.StripPrefix("/static/", http.FileServer(http.FS(staticSub)))))
 
-	http.HandleFunc("/", handleIndex(cfg, kalshiClient, polyClient))
-	http.HandleFunc("/stream", handleStream(cfg, kalshiClient, polyClient))
-	http.HandleFunc("/news", handleNews(cfg))
+	http.HandleFunc("/", securityHeadersFunc(handleIndex(cfg, kalshiClient, polyClient, &store, qdrant, embedder)))
+	http.HandleFunc("/stream", securityHeadersFunc(handleStream(cfg, kalshiClient, polyClient)))
+	http.HandleFunc("/news", securityHeadersFunc(handleNews(cfg)))
+	http.HandleFunc("/api/pairs", securityHeadersFunc(handleAPIPairs(cfg, &store)))
+	http.HandleFunc("/api/stats", securityHeadersFunc(handleAPIStats(&store)))
+
+	// Periodically evict expired entries from the result cache.
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			resultCache.Range(func(key, value any) bool {
+				if cr, ok := value.(*cachedResult); ok && now.After(cr.expiresAt) {
+					resultCache.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 	fmt.Printf("[equinox-ui] Listening on :%s\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{
+		Addr:         ":" + port,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Fatal(server.ListenAndServe())
+}
+
+// securityHeaders wraps an http.Handler and sets security response headers.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=()")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeadersFunc wraps an http.HandlerFunc and sets security response headers.
+func securityHeadersFunc(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=()")
+		next.ServeHTTP(w, r)
+	}
 }
 
 // handleIndex serves the main page with optional cached results.
-func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client) http.HandlerFunc {
+func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, storePtr *atomic.Pointer[storage.Store], qdrant *storage.QdrantClient, embedder *storage.EmbeddingClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
 		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		deepSearch := r.URL.Query().Get("more") == "1"
-		cacheKey := query
-		if deepSearch {
-			cacheKey = query + "|more=1"
+		if len(query) > 500 {
+			query = query[:500]
 		}
+		browse := r.URL.Query().Get("browse") == "1"
+
+		store := storePtr.Load()
 
 		var data *PageData
 		var err error
-		if query == "" {
-			data = &PageData{VenueCounts: map[models.VenueID]int{}}
-		} else {
-			// Check short-lived cache populated by /stream
-			if v, ok := resultCache.Load(cacheKey); ok {
-				cr := v.(*cachedResult)
-				if time.Now().Before(cr.expiresAt) {
-					data = cr.data
-				} else {
-					resultCache.Delete(cacheKey)
+
+		if browse && store != nil {
+			// Browse mode: use indexed pairs from SQLite
+			limit := 50
+			if l := r.URL.Query().Get("limit"); l != "" {
+				if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= 200 {
+					limit = n
 				}
 			}
-			if data == nil {
-				fmt.Printf("[equinox-ui] Running search pipeline q=%q deep=%t\n", query, deepSearch)
-				data, err = runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, deepSearch, nil)
+			data, err = runIndexedBrowse(cfg, store, query, limit)
+			if err != nil {
+				log.Printf("runIndexedBrowse (browse): %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+		} else if query == "" {
+			data = &PageData{VenueCounts: map[models.VenueID]int{}}
+			if store != nil {
+				if stats, err := store.GetStats(); err == nil {
+					data.IndexStats = &IndexStats{
+						Total:      stats.Total,
+						Polymarket: stats.ByVenue["polymarket"],
+						Kalshi:     stats.ByVenue["kalshi"],
+						LastUpdate: stats.LastUpdate,
+					}
+				}
+			} else {
+				data.IndexLoading = true
+			}
+		} else if qdrant != nil && embedder != nil && store != nil {
+			// Qdrant semantic search: embed query -> vector search -> hydrate from SQLite
+			data, err = runQdrantSearch(r.Context(), cfg, kalshiClient, qdrant, embedder, store, query, 20)
+			if err != nil {
+				fmt.Printf("[equinox-ui] WARNING: Qdrant search failed, falling back to FTS: %v\n", err)
+				data, err = runIndexedBrowse(cfg, store, query, 50)
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
+					log.Printf("runIndexedBrowse (qdrant fallback): %v", err)
+					http.Error(w, "Internal server error", http.StatusInternalServerError)
 					return
 				}
+			}
+			data.IndexSearch = true
+			data.BrowseMode = false
+		} else if store != nil {
+			// FTS fallback: instant search from SQLite
+			limit := 50
+			if l := r.URL.Query().Get("limit"); l != "" {
+				if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= 200 {
+					limit = n
+				}
+			}
+			data, err = runIndexedBrowse(cfg, store, query, limit)
+			if err != nil {
+				log.Printf("runIndexedBrowse (FTS): %v", err)
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			data.IndexSearch = true
+			data.BrowseMode = false
+		} else {
+			// No index: render page with LiveSearchPending so JS auto-triggers SSE
+			data = &PageData{
+				SearchQuery:       query,
+				HasQuery:          true,
+				LiveSearchPending: true,
+				VenueCounts:       map[models.VenueID]int{},
 			}
 		}
 
@@ -112,6 +241,9 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 func handleStream(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		if len(query) > 500 {
+			query = query[:500]
+		}
 		deepSearch := r.URL.Query().Get("more") == "1"
 		cacheKey := query
 		if deepSearch {
@@ -142,7 +274,8 @@ func handleStream(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *p
 
 		data, pipelineErr := runSearchPipelineWithProgress(cfg, kalshiClient, polyClient, query, deepSearch, emit)
 		if pipelineErr != nil {
-			emit(progressEvent{Type: "error", Msg: pipelineErr.Error()})
+			log.Printf("search pipeline error: %v", pipelineErr)
+			emit(progressEvent{Type: "error", Msg: "Search failed. Please try again."})
 			return
 		}
 
@@ -152,30 +285,5 @@ func handleStream(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *p
 			expiresAt: time.Now().Add(2 * time.Minute),
 		})
 		emit(progressEvent{Type: "done"})
-	}
-}
-
-// handleNews returns news articles for a query as JSON.
-func handleNews(cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if query == "" {
-			http.Error(w, "missing q", http.StatusBadRequest)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-		fetcher := news.NewFetcher(cfg.HTTPTimeout, cfg.NewsMaxArticles)
-		mn := fetcher.FetchForQuery(ctx, query)
-		var articles []NewsArticleView
-		if mn != nil {
-			articles = toNewsArticleViews(mn)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=300")
-		json.NewEncoder(w).Encode(map[string]any{
-			"query":    query,
-			"articles": articles,
-		})
 	}
 }

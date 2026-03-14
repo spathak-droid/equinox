@@ -316,20 +316,41 @@ func TestNormalizeDateParsingFormats(t *testing.T) {
 
 func TestKalshiCanonicalTitle(t *testing.T) {
 	tests := []struct {
-		event, sub string
-		want       string
+		event, sub, rules string
+		want              string
 	}{
-		{"World Cup Winner", "Spain", "World Cup Winner — Spain"},
-		{"World Cup Winner", "", "World Cup Winner"},
-		{"", "Spain", "Spain"},
-		{"", "", ""},
+		{"World Cup Winner", "Spain", "", "World Cup Winner — Spain"},
+		{"World Cup Winner", "", "", "World Cup Winner"},
+		{"", "Spain", "", "Spain"},
+		{"", "", "", ""},
+		// Party-label subtitles: extract candidate from rules_primary
+		{
+			"2028 U.S. Presidential Election winner?",
+			":: Democratic",
+			"If Mark Kelly is the next person inaugurated as President for the term beginning in 2029, then the market resolves to Yes.",
+			"2028 U.S. Presidential Election winner? — Mark Kelly",
+		},
+		// Non-party :: subtitle with no rules → strip :: prefix, keep name
+		{
+			"Best Picture Winner",
+			":: Drama",
+			"",
+			"Best Picture Winner — Drama",
+		},
+		// Named subtitle (no ::) stays as-is
+		{
+			"2028 U.S. Presidential Election winner?",
+			"Jamie Dimon",
+			"If Jamie Dimon is the next person inaugurated as President, then Yes.",
+			"2028 U.S. Presidential Election winner? — Jamie Dimon",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := kalshiCanonicalTitle(tt.event, tt.sub)
+			got := kalshiCanonicalTitle(tt.event, tt.sub, tt.rules)
 			if got != tt.want {
-				t.Errorf("kalshiCanonicalTitle(%q, %q) = %q, want %q", tt.event, tt.sub, got, tt.want)
+				t.Errorf("kalshiCanonicalTitle(%q, %q, %q) = %q, want %q", tt.event, tt.sub, tt.rules, got, tt.want)
 			}
 		})
 	}
