@@ -67,9 +67,9 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	matchCount, probableCount := 0, 0
 	for _, pv := range pairViews {
 		switch pv.Confidence {
-		case "MATCH":
+		case string(matcher.ConfidenceMatch):
 			matchCount++
-		case "PROBABLE_MATCH":
+		case string(matcher.ConfidenceProbable):
 			probableCount++
 		}
 	}

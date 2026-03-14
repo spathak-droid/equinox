@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -278,11 +279,7 @@ func RankCandidatesByBestMatch(marketsA, marketsB []*models.CanonicalMarket, top
 	}
 
 	// Sort by score descending
-	for i := 1; i < len(bestPairs); i++ {
-		for j := i; j > 0 && bestPairs[j].score > bestPairs[j-1].score; j-- {
-			bestPairs[j], bestPairs[j-1] = bestPairs[j-1], bestPairs[j]
-		}
-	}
+	sort.Slice(bestPairs, func(i, j int) bool { return bestPairs[i].score > bestPairs[j].score })
 
 	// Deduplicate: each candidate market appears at most once
 	usedB := map[string]bool{}

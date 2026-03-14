@@ -104,12 +104,8 @@ func (idx *MarketIndex) FindCandidates(market *models.CanonicalMarket, minShared
 		candidates = append(candidates, candidate{market: m, shared: count})
 	}
 
-	// Sort by shared keyword count descending (insertion sort, typically small N)
-	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].shared > candidates[j-1].shared; j-- {
-			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
-		}
-	}
+	// Sort by shared keyword count descending
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].shared > candidates[j].shared })
 
 	result := make([]*models.CanonicalMarket, len(candidates))
 	for i, c := range candidates {
@@ -254,11 +250,7 @@ func (m *Matcher) FindEquivalentPairsFromIndex(ctx context.Context, markets []*m
 	}
 
 	// Sort by composite score descending
-	for i := 1; i < len(confirmed); i++ {
-		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
-			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
-		}
-	}
+	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].CompositeScore > confirmed[j].CompositeScore })
 
 	for _, r := range confirmed {
 		fmt.Printf("[matcher/index] %s -- %s vs %s (score=%.3f): %s\n",

@@ -9,12 +9,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +55,13 @@ func main() {
 	if dbPath == "" {
 		dbPath = "equinox_markets_v2.db"
 	}
+	// Log DB file info for debugging deploy issues.
+	if info, err := os.Stat(dbPath); err != nil {
+		fmt.Printf("[equinox-ui] DB file %s: NOT FOUND (%v)\n", dbPath, err)
+	} else {
+		fmt.Printf("[equinox-ui] DB file %s: %.1f MB\n", dbPath, float64(info.Size())/(1024*1024))
+	}
+
 	var store atomic.Pointer[storage.Store]
 	go func() {
 		s, err := storage.NewStore(dbPath)
@@ -65,7 +72,7 @@ func main() {
 		store.Store(s)
 		stats, _ := s.GetStats()
 		fmt.Printf("[equinox-ui] Index loaded: %d markets (%d polymarket, %d kalshi)\n",
-			stats.Total, stats.ByVenue["polymarket"], stats.ByVenue["kalshi"])
+			stats.Total, stats.ByVenue[string(models.VenuePolymarket)], stats.ByVenue[string(models.VenueKalshi)])
 	}()
 
 	// Set up Qdrant + embedding clients for semantic search (optional).
@@ -86,11 +93,11 @@ func main() {
 	}
 	http.Handle("/static/", securityHeaders(http.StripPrefix("/static/", http.FileServer(http.FS(staticSub)))))
 
-	http.HandleFunc("/", securityHeadersFunc(handleIndex(cfg, kalshiClient, polyClient, &store, qdrant, embedder)))
-	http.HandleFunc("/stream", securityHeadersFunc(handleStream(cfg, kalshiClient, polyClient)))
-	http.HandleFunc("/news", securityHeadersFunc(handleNews(cfg)))
-	http.HandleFunc("/api/pairs", securityHeadersFunc(handleAPIPairs(cfg, &store)))
-	http.HandleFunc("/api/stats", securityHeadersFunc(handleAPIStats(&store)))
+	http.Handle("/", securityHeaders(handleIndex(cfg, kalshiClient, polyClient, &store, qdrant, embedder)))
+	http.Handle("/stream", securityHeaders(handleStream(cfg, kalshiClient, polyClient)))
+	http.Handle("/news", securityHeaders(handleNews(cfg)))
+	http.Handle("/api/pairs", securityHeaders(handleAPIPairs(cfg, &store)))
+	http.Handle("/api/stats", securityHeaders(handleAPIStats(&store)))
 
 	// Periodically evict expired entries from the result cache.
 	go func() {
@@ -132,16 +139,6 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// securityHeadersFunc wraps an http.HandlerFunc and sets security response headers.
-func securityHeadersFunc(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "camera=(), microphone=()")
-		next.ServeHTTP(w, r)
-	}
-}
 
 // handleIndex serves the main page with optional cached results.
 func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client, storePtr *atomic.Pointer[storage.Store], qdrant *storage.QdrantClient, embedder *storage.EmbeddingClient) http.HandlerFunc {
@@ -150,10 +147,7 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 			http.NotFound(w, r)
 			return
 		}
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if len(query) > 500 {
-			query = query[:500]
-		}
+		query := truncateQuery(strings.TrimSpace(r.URL.Query().Get("q")), 500)
 		browse := r.URL.Query().Get("browse") == "1"
 
 		store := storePtr.Load()
@@ -163,12 +157,7 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 
 		if browse && store != nil {
 			// Browse mode: use indexed pairs from SQLite
-			limit := 50
-			if l := r.URL.Query().Get("limit"); l != "" {
-				if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= 200 {
-					limit = n
-				}
-			}
+			limit := parseLimitParam(r, 50, 200)
 			data, err = runIndexedBrowse(cfg, store, query, limit)
 			if err != nil {
 				log.Printf("runIndexedBrowse (browse): %v", err)
@@ -181,8 +170,8 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 				if stats, err := store.GetStats(); err == nil {
 					data.IndexStats = &IndexStats{
 						Total:      stats.Total,
-						Polymarket: stats.ByVenue["polymarket"],
-						Kalshi:     stats.ByVenue["kalshi"],
+						Polymarket: stats.ByVenue[string(models.VenuePolymarket)],
+						Kalshi:     stats.ByVenue[string(models.VenueKalshi)],
 						LastUpdate: stats.LastUpdate,
 					}
 				}
@@ -190,13 +179,15 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 				data.IndexLoading = true
 			}
 		} else if qdrant != nil && embedder != nil && store != nil {
-			// Qdrant semantic search: embed query -> vector search -> hydrate from SQLite
-			data, err = runQdrantSearch(r.Context(), cfg, kalshiClient, qdrant, embedder, store, query, 20)
+			// Qdrant semantic search with short timeout, FTS fallback
+			qCtx, qCancel := context.WithTimeout(r.Context(), 10*time.Second)
+			data, err = runQdrantSearch(qCtx, cfg, kalshiClient, qdrant, embedder, store, query, 20)
+			qCancel()
 			if err != nil {
-				fmt.Printf("[equinox-ui] WARNING: Qdrant search failed, falling back to FTS: %v\n", err)
+				fmt.Printf("[equinox-ui] Qdrant failed, falling back to FTS: %v\n", err)
 				data, err = runIndexedBrowse(cfg, store, query, 50)
 				if err != nil {
-					log.Printf("runIndexedBrowse (qdrant fallback): %v", err)
+					log.Printf("runIndexedBrowse (fallback): %v", err)
 					http.Error(w, "Internal server error", http.StatusInternalServerError)
 					return
 				}
@@ -204,13 +195,8 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 			data.IndexSearch = true
 			data.BrowseMode = false
 		} else if store != nil {
-			// FTS fallback: instant search from SQLite
-			limit := 50
-			if l := r.URL.Query().Get("limit"); l != "" {
-				if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= 200 {
-					limit = n
-				}
-			}
+			// FTS search from SQLite (instant, always available when index is loaded)
+			limit := parseLimitParam(r, 50, 200)
 			data, err = runIndexedBrowse(cfg, store, query, limit)
 			if err != nil {
 				log.Printf("runIndexedBrowse (FTS): %v", err)
@@ -240,10 +226,7 @@ func handleIndex(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *po
 // handleStream runs the search pipeline and emits SSE progress events.
 func handleStream(cfg *config.Config, kalshiClient *kalshi.Client, polyClient *polymarket.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if len(query) > 500 {
-			query = query[:500]
-		}
+		query := truncateQuery(strings.TrimSpace(r.URL.Query().Get("q")), 500)
 		deepSearch := r.URL.Query().Get("more") == "1"
 		cacheKey := query
 		if deepSearch {

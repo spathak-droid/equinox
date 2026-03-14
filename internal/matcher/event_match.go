@@ -18,12 +18,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
 )
+
+// eventHTTPClient is used for event-matching LLM requests with a bounded timeout.
+var eventHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 // EventMatchResult pairs two matched events and their child market pairings.
 type EventMatchResult struct {
@@ -159,7 +163,6 @@ func matchEventsViaLLM(ctx context.Context, cfg *config.Config, eventsA, eventsB
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.OpenAIAPIKey)
 
-	eventHTTPClient := &http.Client{Timeout: 60 * time.Second}
 	resp, err := eventHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("calling OpenAI: %w", err)
@@ -277,11 +280,7 @@ func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResu
 	}
 
 	// Sort by subtitle score descending
-	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].subScore > candidates[j-1].subScore; j-- {
-			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
-		}
-	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].subScore > candidates[j].subScore })
 
 	// Deduplicate: each market in at most one pair
 	usedA := map[string]bool{}
@@ -316,11 +315,7 @@ func FlattenEventMatches(eventResults []*EventMatchResult) []*MatchResult {
 	}
 
 	// Sort by composite score descending
-	for i := 1; i < len(all); i++ {
-		for j := i; j > 0 && all[j].CompositeScore > all[j-1].CompositeScore; j-- {
-			all[j], all[j-1] = all[j-1], all[j]
-		}
-	}
+	sort.Slice(all, func(i, j int) bool { return all[i].CompositeScore > all[j].CompositeScore })
 
 	return all
 }

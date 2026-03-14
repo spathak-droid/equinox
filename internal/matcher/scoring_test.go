@@ -2,6 +2,7 @@ package matcher
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -172,33 +173,12 @@ func TestNormTitle(t *testing.T) {
 }
 
 func containsWord(s, word string) bool {
-	for _, w := range splitWords(s) {
+	for _, w := range strings.Fields(s) {
 		if w == word {
 			return true
 		}
 	}
 	return false
-}
-
-func splitWords(s string) []string {
-	var words []string
-	start := -1
-	for i, r := range s {
-		if r == ' ' {
-			if start >= 0 {
-				words = append(words, s[start:i])
-				start = -1
-			}
-		} else {
-			if start < 0 {
-				start = i
-			}
-		}
-	}
-	if start >= 0 {
-		words = append(words, s[start:])
-	}
-	return words
 }
 
 // ─── NormalizeNumbers ───────────────────────────────────────────────────────

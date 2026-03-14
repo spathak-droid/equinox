@@ -69,22 +69,20 @@ func (t *Tracer) TraceMatchRun(ctx context.Context, query string, marketCount in
 	}
 
 	return &RunTrace{
-		tracer:  t,
-		traceID: trace.ID,
-		trace:   trace,
+		tracer: t,
+		trace:  trace,
 	}, nil
 }
 
 // RunTrace represents an active pipeline trace. All methods are no-ops when
 // the parent Tracer is disabled or when the trace failed to initialize.
 type RunTrace struct {
-	tracer  *Tracer
-	traceID string
-	trace   *model.Trace
+	tracer *Tracer
+	trace  *model.Trace
 }
 
 func (rt *RunTrace) active() bool {
-	return rt != nil && rt.tracer.Enabled() && rt.traceID != ""
+	return rt != nil && rt.tracer.Enabled() && rt.trace != nil && rt.trace.ID != ""
 }
 
 // SpanCompare traces a single market pair comparison within the pipeline run.
@@ -95,7 +93,7 @@ func (rt *RunTrace) SpanCompare(a, b string, compositeScore float64, confidence 
 
 	now := time.Now()
 	span, err := rt.tracer.client.Span(&model.Span{
-		TraceID:   rt.traceID,
+		TraceID:   rt.trace.ID,
 		Name:      "compare-pair",
 		StartTime: &now,
 		Input: model.M{
@@ -132,7 +130,7 @@ func (rt *RunTrace) SpanLLMCall(prompt string, response string, llmModel string,
 	startTime := now.Add(-time.Duration(durationMs) * time.Millisecond)
 
 	gen, err := rt.tracer.client.Generation(&model.Generation{
-		TraceID:   rt.traceID,
+		TraceID:   rt.trace.ID,
 		Name:      "llm-verify-pairs",
 		StartTime: &startTime,
 		Model:     llmModel,
@@ -164,7 +162,7 @@ func (rt *RunTrace) ScoreRun(name string, value float64, comment string) error {
 	}
 
 	_, err := rt.tracer.client.Score(&model.Score{
-		TraceID: rt.traceID,
+		TraceID: rt.trace.ID,
 		Name:    name,
 		Value:   value,
 		Comment: comment,

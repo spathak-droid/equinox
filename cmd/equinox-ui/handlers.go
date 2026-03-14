@@ -20,6 +20,25 @@ import (
 	"github.com/equinox/internal/venues/kalshi"
 )
 
+// parseLimitParam reads the "limit" query parameter from the request.
+// It returns defaultVal unless the parameter is a valid integer in (0, maxVal].
+func parseLimitParam(r *http.Request, defaultVal, maxVal int) int {
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= maxVal {
+			return n
+		}
+	}
+	return defaultVal
+}
+
+// truncateQuery truncates a query string to maxLen characters.
+func truncateQuery(q string, maxLen int) string {
+	if len(q) > maxLen {
+		return q[:maxLen]
+	}
+	return q
+}
+
 // handleAPIPairs returns matched pairs from the index as JSON.
 func handleAPIPairs(cfg *config.Config, storePtr *atomic.Pointer[storage.Store]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -28,16 +47,8 @@ func handleAPIPairs(cfg *config.Config, storePtr *atomic.Pointer[storage.Store])
 			http.Error(w, "index not available", http.StatusServiceUnavailable)
 			return
 		}
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if len(query) > 500 {
-			query = query[:500]
-		}
-		limit := 50
-		if l := r.URL.Query().Get("limit"); l != "" {
-			if n, e := strconv.Atoi(l); e == nil && n > 0 && n <= 200 {
-				limit = n
-			}
-		}
+		query := truncateQuery(strings.TrimSpace(r.URL.Query().Get("q")), 500)
+		limit := parseLimitParam(r, 50, 200)
 
 		data, err := runIndexedBrowse(cfg, store, query, limit)
 		if err != nil {
@@ -80,10 +91,7 @@ func handleAPIStats(storePtr *atomic.Pointer[storage.Store]) http.HandlerFunc {
 // handleNews returns news articles for a query as JSON.
 func handleNews(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		query := strings.TrimSpace(r.URL.Query().Get("q"))
-		if len(query) > 500 {
-			query = query[:500]
-		}
+		query := truncateQuery(strings.TrimSpace(r.URL.Query().Get("q")), 500)
 		if query == "" {
 			http.Error(w, "missing q", http.StatusBadRequest)
 			return
@@ -114,31 +122,27 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 	var searchResults []matcher.SearchResult
 
 	if query != "" {
-		// Search mode: FTS search for the query, get candidates from both venues
-		polyResults, _ := store.SearchByTitleOR(query, "kalshi", 40)    // poly markets
-		kalshiResults, _ := store.SearchByTitleOR(query, "polymarket", 40) // kalshi markets
-
-		// Cross-match: each poly result searches kalshi and vice versa
-		// Use OR-based search for cross-venue matching (titles differ between venues)
-		for _, pm := range polyResults {
-			candidates, err := store.SearchByTitleOR(pm.Title, "polymarket", 10)
-			if err != nil || len(candidates) == 0 {
-				continue
-			}
-			searchResults = append(searchResults, matcher.SearchResult{
-				Source:     pm,
-				Candidates: candidates,
-			})
+		// Search mode: FTS search for the query, get top results from each venue.
+		// Try AND-based search first (all words must match), fall back to OR if empty.
+		polyResults, _ := store.SearchByTitle(query, string(models.VenueKalshi), 20)
+		kalshiResults, _ := store.SearchByTitle(query, string(models.VenuePolymarket), 20)
+		if len(polyResults) == 0 {
+			polyResults, _ = store.SearchByTitleOR(query, string(models.VenueKalshi), 20)
 		}
-		for _, km := range kalshiResults {
-			candidates, err := store.SearchByTitleOR(km.Title, "kalshi", 10)
-			if err != nil || len(candidates) == 0 {
-				continue
+		if len(kalshiResults) == 0 {
+			kalshiResults, _ = store.SearchByTitleOR(query, string(models.VenuePolymarket), 20)
+		}
+
+		// Cross-match: use the original query (not full titles) to find
+		// candidates from the other venue. This avoids 80+ expensive FTS queries.
+		// Each poly market is paired with all kalshi results as candidates, and vice versa.
+		for _, pm := range polyResults {
+			if len(kalshiResults) > 0 {
+				searchResults = append(searchResults, matcher.SearchResult{
+					Source:     pm,
+					Candidates: kalshiResults,
+				})
 			}
-			searchResults = append(searchResults, matcher.SearchResult{
-				Source:     km,
-				Candidates: candidates,
-			})
 		}
 	} else {
 		// Browse all: check cache first
@@ -151,12 +155,12 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 		browseCache.Unlock()
 
 		// Browse all: load top markets from each venue and cross-search
-		polyMarkets, err := store.GetTopMarketsLite("polymarket", 50)
+		polyMarkets, err := store.GetTopMarketsLite(string(models.VenuePolymarket), 50)
 		if err != nil {
 			return nil, fmt.Errorf("loading polymarket: %w", err)
 		}
 		for _, pm := range polyMarkets {
-			candidates, err := store.SearchByTitleOR(pm.Title, "polymarket", 10)
+			candidates, err := store.SearchByTitleOR(pm.Title, string(models.VenuePolymarket), 10)
 			if err != nil || len(candidates) == 0 {
 				continue
 			}
@@ -167,7 +171,7 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 		}
 	}
 
-	pairs := mtch.FindMatchesFromSearchResults(searchResults, 5)
+	pairs := mtch.FindMatchesRelaxed(searchResults, 10, 0.20)
 	if len(pairs) > limit {
 		pairs = pairs[:limit]
 	}
@@ -179,9 +183,9 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 		pv := matchToPairView(cfg, r, p)
 		pairViews = append(pairViews, pv)
 		switch pv.Confidence {
-		case "MATCH":
+		case string(matcher.ConfidenceMatch):
 			matchCount++
-		case "PROBABLE_MATCH":
+		case string(matcher.ConfidenceProbable):
 			probableCount++
 		}
 	}
@@ -192,8 +196,8 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 		SearchQuery: query,
 		Pairs:       pairViews,
 		VenueCounts: map[models.VenueID]int{
-			models.VenuePolymarket: stats.ByVenue["polymarket"],
-			models.VenueKalshi:     stats.ByVenue["kalshi"],
+			models.VenuePolymarket: stats.ByVenue[string(models.VenuePolymarket)],
+			models.VenueKalshi:     stats.ByVenue[string(models.VenueKalshi)],
 		},
 		MatchCount:    matchCount,
 		ProbableCount: probableCount,
@@ -201,8 +205,8 @@ func runIndexedBrowse(cfg *config.Config, store *storage.Store, query string, li
 		BrowseMode:    true,
 		IndexStats: &IndexStats{
 			Total:      stats.Total,
-			Polymarket: stats.ByVenue["polymarket"],
-			Kalshi:     stats.ByVenue["kalshi"],
+			Polymarket: stats.ByVenue[string(models.VenuePolymarket)],
+			Kalshi:     stats.ByVenue[string(models.VenueKalshi)],
 			LastUpdate: stats.LastUpdate,
 		},
 	}
@@ -237,11 +241,11 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 		}
 	}
 
-	polyResults, err := qdrant.Search(ctx, queryVec, topK, venueFilter("polymarket"))
+	polyResults, err := qdrant.Search(ctx, queryVec, topK, venueFilter(string(models.VenuePolymarket)))
 	if err != nil {
 		return nil, fmt.Errorf("qdrant search polymarket: %w", err)
 	}
-	kalshiResults, err := qdrant.Search(ctx, queryVec, topK, venueFilter("kalshi"))
+	kalshiResults, err := qdrant.Search(ctx, queryVec, topK, venueFilter(string(models.VenueKalshi)))
 	if err != nil {
 		return nil, fmt.Errorf("qdrant search kalshi: %w", err)
 	}
@@ -254,8 +258,8 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 			VenueCounts: map[models.VenueID]int{},
 			IndexStats: &IndexStats{
 				Total:      stats.Total,
-				Polymarket: stats.ByVenue["polymarket"],
-				Kalshi:     stats.ByVenue["kalshi"],
+				Polymarket: stats.ByVenue[string(models.VenuePolymarket)],
+				Kalshi:     stats.ByVenue[string(models.VenueKalshi)],
 				LastUpdate: stats.LastUpdate,
 			},
 		}, nil
@@ -288,6 +292,13 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 	polyMarkets := hydrate(polyResults, "poly")
 	kalshiMarkets := hydrate(kalshiResults, "kalshi")
 
+	// If Qdrant results couldn't be hydrated from SQLite (stale vector index),
+	// fall back to FTS search which works directly from SQLite.
+	if len(polyMarkets) == 0 && len(kalshiMarkets) == 0 {
+		fmt.Printf("[equinox-ui] Qdrant hydration returned 0 markets, falling back to FTS\n")
+		return nil, fmt.Errorf("qdrant results not in SQLite (stale vector index)")
+	}
+
 	// Fetch images for Kalshi markets missing them (v2 indexed data has no images)
 	var needImages []string
 	for _, m := range kalshiMarkets {
@@ -313,14 +324,10 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 	for _, m := range kalshiMarkets {
 		kalshiSeen[m.VenueMarketID] = true
 	}
-	polySeen := map[string]bool{}
-	for _, m := range polyMarkets {
-		polySeen[m.VenueMarketID] = true
-	}
 	// Also do a single FTS OR search with the original query to get Kalshi matches directly
-	ftsKalshi, _ := store.SearchByTitleOR(query, "polymarket", 20)
+	ftsKalshi, _ := store.SearchByTitleOR(query, string(models.VenuePolymarket), 20)
 	for _, fm := range ftsKalshi {
-		if fm.VenueID != "kalshi" || kalshiSeen[fm.VenueMarketID] {
+		if fm.VenueID != models.VenueKalshi || kalshiSeen[fm.VenueMarketID] {
 			continue
 		}
 		if isGarbageMarket(fm) {
@@ -335,9 +342,9 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 		ftsLimit = len(polyMarkets)
 	}
 	for _, pm := range polyMarkets[:ftsLimit] {
-		ftsResults, _ := store.SearchByTitle(pm.Title, "polymarket", 5)
+		ftsResults, _ := store.SearchByTitle(pm.Title, string(models.VenuePolymarket), 5)
 		for _, fm := range ftsResults {
-			if fm.VenueID != "kalshi" || kalshiSeen[fm.VenueMarketID] {
+			if fm.VenueID != models.VenueKalshi || kalshiSeen[fm.VenueMarketID] {
 				continue
 			}
 			if isGarbageMarket(fm) {
@@ -419,8 +426,8 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 		HasQuery:      true,
 		IndexStats: &IndexStats{
 			Total:      stats.Total,
-			Polymarket: stats.ByVenue["polymarket"],
-			Kalshi:     stats.ByVenue["kalshi"],
+			Polymarket: stats.ByVenue[string(models.VenuePolymarket)],
+			Kalshi:     stats.ByVenue[string(models.VenueKalshi)],
 			LastUpdate: stats.LastUpdate,
 		},
 	}, nil

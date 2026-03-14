@@ -1,0 +1,16 @@
+.git/
+.idea/
+.vscode/
+.DS_Store
+.claude/
+{cmd/
+testdata/
+*.md
+
+# Exclude raw DBs (only ship .zst)
+!*.db.zst
+*.db
+*.db-shm
+*.db-wal
+*.db.gz
+.equinox_embedding_cache.json

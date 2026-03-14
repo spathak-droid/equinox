@@ -134,7 +134,7 @@ var synonyms = map[string]string{
 	"sol": "solana", "doge": "dogecoin", "ada": "cardano",
 	"gop": "republican", "dems": "democrat", "dem": "democrat",
 	"potus": "president", "scotus": "supreme court",
-	"fed": "federal reserve", "fomc": "federal reserve",
+	"fed": "federal reserve", "fomc": "federal reserve", "reserve": "federal reserve",
 	"gdp": "gross domestic product", "cpi": "consumer price index",
 	"pce": "personal consumption expenditures", "bps": "basis points",
 	"reaches": "reach", "reached": "reach", "reaching": "reach",

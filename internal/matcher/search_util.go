@@ -1,6 +1,7 @@
 package matcher
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/equinox/internal/models"
@@ -191,11 +192,7 @@ func topPairsByJaccard(marketsA, marketsB []*models.CanonicalMarket, k int) [][2
 	}
 
 	// Sort descending by similarity
-	for i := 1; i < len(all); i++ {
-		for j := i; j > 0 && all[j].sim > all[j-1].sim; j-- {
-			all[j], all[j-1] = all[j-1], all[j]
-		}
-	}
+	sort.Slice(all, func(i, j int) bool { return all[i].sim > all[j].sim })
 
 	// Take top-k, each market used once
 	usedA := map[string]bool{}
@@ -245,11 +242,7 @@ func topByQueryMatch(query string, markets []*models.CanonicalMarket, k int) []*
 	}
 
 	// Sort descending by score
-	for i := 1; i < len(items); i++ {
-		for j := i; j > 0 && items[j].score > items[j-1].score; j-- {
-			items[j], items[j-1] = items[j-1], items[j]
-		}
-	}
+	sort.Slice(items, func(i, j int) bool { return items[i].score > items[j].score })
 
 	if k > len(items) {
 		k = len(items)

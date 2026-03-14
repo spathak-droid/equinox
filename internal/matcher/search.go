@@ -11,6 +11,7 @@ package matcher
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/equinox/internal/models"
 )
@@ -87,11 +88,7 @@ func (m *Matcher) FindEquivalentPairsFromSearch(_ context.Context, searchResults
 	confirmed = DeduplicatePairs(confirmed)
 
 	// Sort by composite score descending so best pairs win dedup.
-	for i := 1; i < len(confirmed); i++ {
-		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
-			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
-		}
-	}
+	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].CompositeScore > confirmed[j].CompositeScore })
 
 	// Each market may appear in at most one pair — keep the highest-scoring match.
 	confirmed = deduplicateByMarket(confirmed)
@@ -140,11 +137,7 @@ func (m *Matcher) FindMatchesFromSearchResults(results []SearchResult, topN int)
 	confirmed = DeduplicatePairs(confirmed)
 
 	// Sort by composite score descending
-	for i := 1; i < len(confirmed); i++ {
-		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
-			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
-		}
-	}
+	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].CompositeScore > confirmed[j].CompositeScore })
 
 	confirmed = deduplicateByMarket(confirmed)
 
@@ -188,11 +181,7 @@ func (m *Matcher) FindMatchesRelaxed(results []SearchResult, topN int, minScore 
 
 	confirmed = DeduplicatePairs(confirmed)
 
-	for i := 1; i < len(confirmed); i++ {
-		for j := i; j > 0 && confirmed[j].CompositeScore > confirmed[j-1].CompositeScore; j-- {
-			confirmed[j], confirmed[j-1] = confirmed[j-1], confirmed[j]
-		}
-	}
+	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i].CompositeScore > confirmed[j].CompositeScore })
 
 	confirmed = deduplicateByMarket(confirmed)
 	return confirmed

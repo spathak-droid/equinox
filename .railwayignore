@@ -1,0 +1,16 @@
+# Ship only the compressed .zst DB
+!*.db.zst
+*.db
+*.db-shm
+*.db-wal
+*.db.gz
+.equinox_embedding_cache.json
+
+.git/
+.idea/
+.vscode/
+.DS_Store
+.claude/
+{cmd/
+testdata/
+*.md

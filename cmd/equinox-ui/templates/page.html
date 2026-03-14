@@ -373,6 +373,10 @@ document.addEventListener("DOMContentLoaded", function() {
   document.querySelectorAll(".hero-hint").forEach(function(a){
     a.addEventListener("click",function(){showLoader();});
   });
+  // Hide overlay when navigating back/forward (bfcache restore)
+  window.addEventListener("pageshow",function(e){
+    if(e.persisted) overlay.style.display="none";
+  });
 })();
 </script>
 <script src="/static/app.js"></script>

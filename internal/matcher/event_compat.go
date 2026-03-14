@@ -4,32 +4,14 @@ package matcher
 
 // --- Entity normalization ---
 
-// entitySynonyms maps entity fragments to their canonical form.
-// This resolves cases where "fed" and "reserve" should both become "federal reserve".
-var entitySynonyms = map[string]string{
-	"fed":    "federal reserve",
-	"fomc":   "federal reserve",
-	"reserve": "federal reserve",
-	"btc":    "bitcoin",
-	"eth":    "ethereum",
-	"sol":    "solana",
-	"doge":   "dogecoin",
-	"ada":    "cardano",
-	"xrp":    "ripple",
-	"gop":    "republican",
-	"dem":    "democrat",
-	"dems":   "democrat",
-	"potus":  "president",
-	"scotus": "supreme court",
-}
-
-// normalizeEntities resolves entity synonyms and deduplicates.
+// normalizeEntities resolves entity synonyms using the shared synonyms map
+// from scoring.go and deduplicates.
 func normalizeEntities(entities []string) []string {
 	seen := map[string]bool{}
 	var result []string
 	for _, e := range entities {
-		// Check synonym mapping
-		if canonical, ok := entitySynonyms[e]; ok {
+		// Check synonym mapping (shared with title normalization in scoring.go)
+		if canonical, ok := synonyms[e]; ok {
 			e = canonical
 		}
 		if !seen[e] {

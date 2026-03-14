@@ -37,3 +37,5 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
+*.db.gz
+*.db.zst
