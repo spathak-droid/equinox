@@ -605,8 +605,7 @@
         '</div>' +
         '<div class="head-separator"></div>' +
         '<div class="score-pills">' +
-          '<div class="score-pill">Fuzzy <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.fuzzy_score) + '"></div></div> <strong>' + fmtScore(p.fuzzy_score) + '</strong></div>' +
-          '<div class="score-pill">Composite <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.composite_score) + '"></div></div> <strong>' + fmtScore(p.composite_score) + '</strong></div>' +
+          '<div class="score-pill">Confidence <div class="bar-mini"><div class="bar-mini-fill" style="width:' + fmtScoreWidth(p.confidence_score) + '"></div></div> <strong>' + fmtScore(p.confidence_score) + '</strong></div>' +
         '</div>' +
         '<div class="head-spacer"></div>' +
         '<div class="route-chip">' +

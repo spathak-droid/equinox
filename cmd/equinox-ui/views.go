@@ -48,16 +48,17 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 		}
 		decision := r.Route(order, p)
 		pv := PairView{
-			MarketA:        toMarketView(p.MarketA),
-			MarketB:        toMarketView(p.MarketB),
-			Confidence:     string(p.Confidence),
-			FuzzyScore:     p.FuzzyScore,
-			EmbeddingScore: p.EmbeddingScore,
-			CompositeScore: p.CompositeScore,
-			Explanation:    p.Explanation,
-			SelectedVenue:  string(decision.SelectedVenue.VenueID),
-			RoutingReason:  decision.Explanation,
-			NewsQuery:      news.BuildNewsQuery(p.MarketA, p.MarketB),
+			MarketA:         toMarketView(p.MarketA),
+			MarketB:         toMarketView(p.MarketB),
+			Confidence:      string(p.Confidence),
+			FuzzyScore:      p.FuzzyScore,
+			EmbeddingScore:  p.EmbeddingScore,
+			CompositeScore:  p.CompositeScore,
+			ConfidenceScore: computeConfidenceScore(p),
+			Explanation:     p.Explanation,
+			SelectedVenue:   string(decision.SelectedVenue.VenueID),
+			RoutingReason:   decision.Explanation,
+			NewsQuery:       news.BuildNewsQuery(p.MarketA, p.MarketB),
 		}
 		if i < len(pairNews) && pairNews[i] != nil {
 			pv.NewsArticles = toNewsArticleViews(pairNews[i])
@@ -86,6 +87,15 @@ func buildPageData(cfg *config.Config, ctx context.Context, m *matcher.Matcher, 
 	}, nil
 }
 
+// computeConfidenceScore returns a single confidence score from the available scores.
+// Prefers embedding score when available, falls back to composite.
+func computeConfidenceScore(p *matcher.MatchResult) float64 {
+	if p.EmbeddingScore > 0 {
+		return p.EmbeddingScore
+	}
+	return p.CompositeScore
+}
+
 // matchToPairView converts a single MatchResult to a PairView with routing and news.
 func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResult) PairView {
 	order := &router.Order{
@@ -95,16 +105,17 @@ func matchToPairView(cfg *config.Config, r *router.Router, p *matcher.MatchResul
 	}
 	decision := r.Route(order, p)
 	pv := PairView{
-		MarketA:        toMarketView(p.MarketA),
-		MarketB:        toMarketView(p.MarketB),
-		Confidence:     string(p.Confidence),
-		FuzzyScore:     p.FuzzyScore,
-		EmbeddingScore: p.EmbeddingScore,
-		CompositeScore: p.CompositeScore,
-		Explanation:    p.Explanation,
-		SelectedVenue:  string(decision.SelectedVenue.VenueID),
-		RoutingReason:  decision.Explanation,
-		NewsQuery:      news.BuildNewsQuery(p.MarketA, p.MarketB),
+		MarketA:         toMarketView(p.MarketA),
+		MarketB:         toMarketView(p.MarketB),
+		Confidence:      string(p.Confidence),
+		FuzzyScore:      p.FuzzyScore,
+		EmbeddingScore:  p.EmbeddingScore,
+		CompositeScore:  p.CompositeScore,
+		ConfidenceScore: computeConfidenceScore(p),
+		Explanation:     p.Explanation,
+		SelectedVenue:   string(decision.SelectedVenue.VenueID),
+		RoutingReason:   decision.Explanation,
+		NewsQuery:       news.BuildNewsQuery(p.MarketA, p.MarketB),
 	}
 	return pv
 }

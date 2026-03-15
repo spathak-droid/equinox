@@ -58,6 +58,12 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 		stepLimit = maxPagesDeep * 2
 	}
 
+	// hasMarketData returns true if a market has meaningful pricing or liquidity.
+	// Markets with 0% yes/no and no liquidity are dead and pollute matching.
+	hasMarketData := func(m *models.CanonicalMarket) bool {
+		return (m.YesPrice > 0 || m.NoPrice > 0) || m.Liquidity > 0
+	}
+
 	// Helper: fetch one page from a venue, normalize, deduplicate into the pool.
 	fetchPoly := func() int {
 		if polyDone {
@@ -74,7 +80,7 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 		normalized, _ := norm.Normalize(ctx, raw)
 		added := 0
 		for _, mm := range normalized {
-			if !seenPoly[mm.VenueMarketID] {
+			if !seenPoly[mm.VenueMarketID] && hasMarketData(mm) {
 				seenPoly[mm.VenueMarketID] = true
 				allPolyMarkets = append(allPolyMarkets, mm)
 				added++
@@ -101,7 +107,7 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 		normalized, _ := norm.Normalize(ctx, raw)
 		added := 0
 		for _, mm := range normalized {
-			if !seenKalshi[mm.VenueMarketID] {
+			if !seenKalshi[mm.VenueMarketID] && hasMarketData(mm) {
 				seenKalshi[mm.VenueMarketID] = true
 				allKalshiMarkets = append(allKalshiMarkets, mm)
 				added++
@@ -294,6 +300,10 @@ func mergeUniqueMarkets(dst *[]*models.CanonicalMarket, seen map[string]bool, in
 	added := 0
 	for _, m := range incoming {
 		if seen[m.VenueMarketID] {
+			continue
+		}
+		// Skip markets with no pricing and no liquidity
+		if m.YesPrice <= 0 && m.NoPrice <= 0 && m.Liquidity <= 0 {
 			continue
 		}
 		seen[m.VenueMarketID] = true

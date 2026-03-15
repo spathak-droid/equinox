@@ -167,9 +167,17 @@ func matchEventsViaLLM(ctx context.Context, cfg *config.Config, eventsA, eventsB
 	prompt := sb.String()
 	fmt.Printf("[matcher/event] Sending %d × %d events to LLM for matching...\n", len(eventsA), len(eventsB))
 
+	// Use gpt-4o for event matching — accuracy matters more than speed/cost.
+	// gpt-4.1-nano and other cheap models produce too many false positives
+	// (e.g. matching "nominee be a woman" with "election occur").
+	verifyModel := "gpt-4o"
+	if cfg.OpenAIModel == "gpt-4o" || cfg.OpenAIModel == "gpt-4-turbo" {
+		verifyModel = cfg.OpenAIModel
+	}
+
 	// Call OpenAI Chat API
 	reqBody := map[string]interface{}{
-		"model": cfg.OpenAIModel,
+		"model": verifyModel,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt},
 		},
