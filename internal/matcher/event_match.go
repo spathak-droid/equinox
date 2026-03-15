@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -292,15 +291,11 @@ func thresholdsClose(a, b float64) bool {
 }
 
 // pairChildMarkets pairs markets within two matched events.
-// Uses three strategies in order:
-//  1. Exact threshold match (e.g. both mention $80,000)
-//  2. Fuzzy subtitle/title match (lowered to 0.3 since events are LLM-verified)
-//  3. For single-market events, direct pair
+// The LLM decides which markets are equivalent; fuzzy scores only rerank.
 func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResult {
-	// If either event has only one market, pair directly via compare()
+	// If either event has only one market, pair directly
 	if len(evA.Markets) == 1 && len(evB.Markets) == 1 {
 		r := m.compare(evA.Markets[0], evB.Markets[0])
-		// Events already matched by LLM, so override confidence
 		r.Confidence = ConfidenceMatch
 		if r.CompositeScore < 0.5 {
 			r.CompositeScore = 0.5
@@ -309,70 +304,180 @@ func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResu
 		return []*MatchResult{r}
 	}
 
-	// Build threshold index for each market
-	type marketThreshold struct {
-		market    *models.CanonicalMarket
-		threshold float64
-		text      string // subtitle or title used for fuzzy
-	}
-
-	extractMT := func(mkt *models.CanonicalMarket) marketThreshold {
-		text := mkt.Subtitle
-		if text == "" {
-			text = mkt.Title
+	// Try LLM-based child pairing first
+	if m.cfg.OpenAIAPIKey != "" {
+		llmPairs := m.pairChildMarketsViaLLM(evA, evB)
+		if len(llmPairs) > 0 {
+			return llmPairs
 		}
-		// Try subtitle first, then title for threshold
-		thr := extractNumericThreshold(text)
-		if thr == 0 {
-			thr = extractNumericThreshold(mkt.Title)
+		fmt.Printf("[matcher/child] LLM returned no pairs for %q × %q, falling back to fuzzy\n",
+			evA.EventTitle, evB.EventTitle)
+	}
+
+	// Fallback: fuzzy reranking (no filtering — all cross pairs considered)
+	return m.pairChildMarketsFuzzy(evA, evB)
+}
+
+// pairChildMarketsViaLLM asks the LLM which child markets across two matched
+// events refer to the same specific outcome. Fuzzy scores rerank the result.
+func (m *Matcher) pairChildMarketsViaLLM(evA, evB *models.CanonicalEvent) []*MatchResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Build prompt
+	var sb strings.Builder
+	sb.WriteString("You are pairing prediction market contracts within the SAME event across two venues.\n")
+	sb.WriteString(fmt.Sprintf("Event: %q\n\n", evA.EventTitle))
+	sb.WriteString("Each venue has multiple contracts (outcomes) under this event.\n")
+	sb.WriteString("Match contracts that bet on the EXACT SAME outcome.\n\n")
+	sb.WriteString("CRITICAL RULES:\n")
+	sb.WriteString("- 'Republican' is NOT 'Democratic' — different parties\n")
+	sb.WriteString("- 'Trump' is NOT 'Newsom' — different candidates\n")
+	sb.WriteString("- '$80,000' is NOT '$100,000' — different thresholds\n")
+	sb.WriteString("- Only match contracts where a YES on one side means the same thing as YES on the other\n")
+	sb.WriteString("- Each contract can match at most ONE from the other venue\n")
+	sb.WriteString("- If no contracts match, return []\n\n")
+
+	marketLabel := func(mkt *models.CanonicalMarket) string {
+		if mkt.Subtitle != "" && mkt.Subtitle != mkt.Title {
+			return fmt.Sprintf("%s — %s", mkt.Title, mkt.Subtitle)
 		}
-		return marketThreshold{market: mkt, threshold: thr, text: text}
+		return mkt.Title
 	}
 
-	mtsA := make([]marketThreshold, len(evA.Markets))
-	mtsB := make([]marketThreshold, len(evB.Markets))
-	for i, a := range evA.Markets {
-		mtsA[i] = extractMT(a)
+	sb.WriteString("Venue A contracts:\n")
+	for i, mkt := range evA.Markets {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i, marketLabel(mkt)))
 	}
-	for i, b := range evB.Markets {
-		mtsB[i] = extractMT(b)
+	sb.WriteString("\nVenue B contracts:\n")
+	for i, mkt := range evB.Markets {
+		sb.WriteString(fmt.Sprintf("  %d. %s\n", i, marketLabel(mkt)))
 	}
 
+	sb.WriteString("\nReturn ONLY a JSON array of matched pairs:\n")
+	sb.WriteString(`[{"a": <index>, "b": <index>, "reason": "brief why"}]`)
+	sb.WriteString("\nReturn [] if no contracts match. Return ONLY the JSON array.\n")
+
+	prompt := sb.String()
+
+	verifyModel := "gpt-4o-mini"
+	if m.cfg.OpenAIModel == "gpt-4o" || m.cfg.OpenAIModel == "gpt-4-turbo" {
+		verifyModel = m.cfg.OpenAIModel
+	}
+
+	reqBody := map[string]interface{}{
+		"model": verifyModel,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"temperature": 0.0,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		fmt.Printf("[matcher/child-llm] marshal error: %v\n", err)
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(bodyBytes))
+	if err != nil {
+		fmt.Printf("[matcher/child-llm] request error: %v\n", err)
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+m.cfg.OpenAIAPIKey)
+
+	resp, err := eventHTTPClient.Do(req)
+	if err != nil {
+		fmt.Printf("[matcher/child-llm] API error: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		fmt.Printf("[matcher/child-llm] read error: %v\n", err)
+		return nil
+	}
+
+	if resp.StatusCode != 200 {
+		fmt.Printf("[matcher/child-llm] OpenAI %d: %s\n", resp.StatusCode, string(respBody))
+		return nil
+	}
+
+	var chatResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &chatResp); err != nil || len(chatResp.Choices) == 0 {
+		fmt.Printf("[matcher/child-llm] parse error: %v\n", err)
+		return nil
+	}
+
+	content := strings.TrimSpace(chatResp.Choices[0].Message.Content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	var llmPairs []llmEventPair
+	if err := json.Unmarshal([]byte(content), &llmPairs); err != nil {
+		fmt.Printf("[matcher/child-llm] JSON parse error: %v (content: %s)\n", err, content)
+		return nil
+	}
+
+	fmt.Printf("[matcher/child-llm] %q: LLM paired %d contracts\n", evA.EventTitle, len(llmPairs))
+
+	var results []*MatchResult
+	for _, p := range llmPairs {
+		if p.A < 0 || p.A >= len(evA.Markets) || p.B < 0 || p.B >= len(evB.Markets) {
+			continue
+		}
+		a := evA.Markets[p.A]
+		b := evB.Markets[p.B]
+
+		r := m.compare(a, b)
+		r.Confidence = ConfidenceMatch
+		if r.CompositeScore < 0.5 {
+			r.CompositeScore = 0.5
+		}
+		r.Explanation = fmt.Sprintf("LLM child-pair: %s | %s", p.Reason, r.Explanation)
+		results = append(results, r)
+	}
+
+	// Rerank by fuzzy score (best pairs first)
+	sort.Slice(results, func(i, j int) bool { return results[i].CompositeScore > results[j].CompositeScore })
+	return results
+}
+
+// pairChildMarketsFuzzy is the no-LLM fallback. Uses fuzzy scoring to rerank
+// all possible cross-pairs, then deduplicates (each market in at most one pair).
+func (m *Matcher) pairChildMarketsFuzzy(evA, evB *models.CanonicalEvent) []*MatchResult {
 	type scored struct {
 		a, b     *models.CanonicalMarket
 		subScore float64
-		method   string
 	}
+
 	var candidates []scored
-
-	for _, a := range mtsA {
-		for _, b := range mtsB {
-			// Strategy 1: exact threshold match (highest priority)
-			if a.threshold > 0 && thresholdsClose(a.threshold, b.threshold) {
-				candidates = append(candidates, scored{
-					a: a.market, b: b.market,
-					subScore: 0.95 + 0.05*(1.0-math.Abs(a.threshold-b.threshold)/math.Max(a.threshold, 1)),
-					method:   fmt.Sprintf("threshold=$%.0f≈$%.0f", a.threshold, b.threshold),
-				})
-				continue
+	for _, a := range evA.Markets {
+		textA := a.Subtitle
+		if textA == "" {
+			textA = a.Title
+		}
+		for _, b := range evB.Markets {
+			textB := b.Subtitle
+			if textB == "" {
+				textB = b.Title
 			}
-
-			// Strategy 2: exact subtitle match
-			if strings.EqualFold(strings.TrimSpace(a.text), strings.TrimSpace(b.text)) {
-				candidates = append(candidates, scored{a: a.market, b: b.market, subScore: 1.0, method: "exact-subtitle"})
-				continue
-			}
-
-			// Strategy 3: fuzzy match with lowered threshold (0.3 instead of 0.5)
-			// Events are already LLM-verified, so we can be more permissive
-			fs := fuzzyTitleScore(a.text, b.text)
-			if fs >= 0.3 {
-				candidates = append(candidates, scored{a: a.market, b: b.market, subScore: fs, method: "fuzzy"})
-			}
+			fs := fuzzyTitleScore(textA, textB)
+			candidates = append(candidates, scored{a: a, b: b, subScore: fs})
 		}
 	}
 
-	// Sort by score descending
+	// Sort by fuzzy score descending
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].subScore > candidates[j].subScore })
 
 	// Deduplicate: each market in at most one pair
@@ -380,28 +485,27 @@ func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResu
 	usedB := map[string]bool{}
 	var pairs []*MatchResult
 	for _, c := range candidates {
-		idA := c.a.VenueMarketID
-		idB := c.b.VenueMarketID
-		if usedA[idA] || usedB[idB] {
+		if usedA[c.a.VenueMarketID] || usedB[c.b.VenueMarketID] {
 			continue
 		}
-		usedA[idA] = true
-		usedB[idB] = true
+		// Only accept if fuzzy score indicates real similarity
+		if c.subScore < 0.4 {
+			continue
+		}
+		usedA[c.a.VenueMarketID] = true
+		usedB[c.b.VenueMarketID] = true
 
-		// Run full compare() to populate all component scores
 		r := m.compare(c.a, c.b)
-		r.Confidence = ConfidenceMatch // events already matched by LLM
+		r.Confidence = ConfidenceMatch
 		if r.CompositeScore < 0.4 {
 			r.CompositeScore = 0.4
 		}
-		r.Explanation = fmt.Sprintf("Event-paired [%s] (%q ≈ %q, sub=%.2f) | %s",
-			c.method, c.a.Subtitle, c.b.Subtitle, c.subScore, r.Explanation)
+		r.Explanation = fmt.Sprintf("Fuzzy child-pair (score=%.2f) | %s", c.subScore, r.Explanation)
 		pairs = append(pairs, r)
 	}
 
-	fmt.Printf("[matcher/child] %q × %q → %d candidates, %d pairs (from %d×%d markets)\n",
-		evA.EventTitle, evB.EventTitle, len(candidates), len(pairs), len(evA.Markets), len(evB.Markets))
-
+	fmt.Printf("[matcher/child-fuzzy] %q × %q → %d pairs (from %d×%d markets)\n",
+		evA.EventTitle, evB.EventTitle, len(pairs), len(evA.Markets), len(evB.Markets))
 	return pairs
 }
 
