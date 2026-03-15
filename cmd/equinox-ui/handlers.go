@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -265,7 +266,9 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 		}, nil
 	}
 
-	// Hydrate full market data from SQLite, skipping garbage titles and bracket markets
+	// Hydrate full market data from SQLite, skipping garbage titles and bracket markets.
+	// Also record Qdrant similarity scores per market for display.
+	qdrantScores := map[string]float64{} // key: "venueID:marketID" -> cosine similarity
 	hydrate := func(results []storage.QdrantSearchResult, label string) []*models.CanonicalMarket {
 		var markets []*models.CanonicalMarket
 		for _, r := range results {
@@ -284,6 +287,7 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 				fmt.Printf("[equinox-ui] hydrate(%s): skip garbage %q\n", label, m.Title)
 				continue
 			}
+			qdrantScores[venueID+":"+marketID] = r.Score
 			markets = append(markets, m)
 		}
 		return markets
@@ -378,12 +382,17 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 			fmt.Printf("[equinox-ui] LLM verification failed: %v\n", err)
 		} else {
 			for _, vp := range verified {
+				// Look up Qdrant cosine similarity for each market in the pair
+				scoreA := qdrantScores[string(vp.MarketA.VenueID)+":"+vp.MarketA.VenueMarketID]
+				scoreB := qdrantScores[string(vp.MarketB.VenueID)+":"+vp.MarketB.VenueMarketID]
+				embScore := (scoreA + scoreB) / 2.0
 				// Wrap in MatchResult for the view pipeline
 				mr := &matcher.MatchResult{
 					MarketA:        vp.MarketA,
 					MarketB:        vp.MarketB,
 					Confidence:     matcher.ConfidenceMatch,
 					CompositeScore: 1.0,
+					EmbeddingScore: embScore,
 					Explanation:    "LLM verified: " + vp.Reason,
 				}
 				pv := matchToPairView(cfg, rtr, mr)
@@ -394,6 +403,11 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 			}
 		}
 	}
+
+	// Sort pairs by embedding score descending (most relevant to query first)
+	sort.Slice(pairViews, func(i, j int) bool {
+		return pairViews[i].EmbeddingScore > pairViews[j].EmbeddingScore
+	})
 
 	// Collect unpaired markets, interleaving venues for better display.
 	// Markets with actual pricing appear before zero-price markets.

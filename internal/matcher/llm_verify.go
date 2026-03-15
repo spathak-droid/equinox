@@ -62,21 +62,19 @@ func VerifyPairsWithLLM(ctx context.Context, cfg *config.Config, candidates []Se
 	// Build the prompt — kept generic, no venue-specific hardcoding.
 	// Title normalization happens in cleanTitleForLLM() before the LLM sees them.
 	var sb strings.Builder
-	sb.WriteString("You are verifying whether prediction market questions from two different venues are asking the EXACT SAME question.\n\n")
-	sb.WriteString("Two markets match ONLY IF a YES resolution on one guarantees a YES resolution on the other, and vice versa.\n\n")
+	sb.WriteString("You are verifying whether prediction market questions from two different venues are about the SAME SUBJECT and EVENT.\n\n")
+	sb.WriteString("Two markets match if they are about the same person/entity doing the same thing, even if timeframes differ slightly.\n")
+	sb.WriteString("The goal is to help users compare prices across venues for related markets.\n\n")
 	sb.WriteString("NO MATCH when:\n")
-	sb.WriteString("- Different actions: 'win' ≠ 'play in', 'win' ≠ 'host', 'impeached' ≠ 'removed from office'\n")
-	sb.WriteString("- Different thresholds: '$100K' ≠ '$150K', 'above 50' ≠ 'above 60'\n")
-	sb.WriteString("- Different timeframes IN THE TITLE: 'by 2026' ≠ 'by 2028'\n")
-	sb.WriteString("- Different subjects: 'Person A wins' ≠ 'Person B wins'\n")
-	sb.WriteString("- Different scope: 'nominated' ≠ 'elected' (nomination doesn't guarantee election)\n\n")
+	sb.WriteString("- Completely different subjects: 'Person A wins' ≠ 'Person B wins'\n")
+	sb.WriteString("- Fundamentally different actions: 'win election' ≠ 'be arrested', 'win' ≠ 'host'\n")
+	sb.WriteString("- Different events: 'NBA Finals' ≠ 'NFL Super Bowl'\n\n")
 	sb.WriteString("MATCH when:\n")
-	sb.WriteString("- Same subject, same action/outcome, same timeframe\n")
+	sb.WriteString("- Same subject doing the same thing, even with slightly different timeframes ('by March' ≈ 'before May')\n")
 	sb.WriteString("- Minor phrasing differences: 'Will X win?' ≈ 'X to win' ≈ 'Is X going to win?'\n")
-	sb.WriteString("- Equivalent terms: 'Finals' ≈ 'Championship' for same sport and year\n")
-	sb.WriteString("- City names match their teams in context (e.g. 'Philadelphia' = 'the 76ers' when discussing NBA)\n\n")
-	sb.WriteString("IMPORTANT: Ignore the [closes ...] dates — those are venue settlement windows, NOT the event date.\n")
-	sb.WriteString("Only compare dates/years that appear IN THE TITLE.\n\n")
+	sb.WriteString("- Equivalent terms: 'out as' ≈ 'leaves', 'Finals' ≈ 'Championship'\n")
+	sb.WriteString("- Same person, same role/position context even if question framing differs\n\n")
+	sb.WriteString("IMPORTANT: Ignore the [closes ...] dates — those are venue settlement windows, NOT the event date.\n\n")
 	sb.WriteString("PAIRS TO VERIFY:\n")
 
 	for i, c := range candidates {
@@ -252,44 +250,55 @@ func RankCandidatesByBestMatch(marketsA, marketsB []*models.CanonicalMarket, top
 		score     float64
 	}
 
-	// For each A market, find best B match using entity-weighted scoring
-	var bestPairs []scored
+	scorePair := func(a, b *models.CanonicalMarket) float64 {
+		fuzzy := fuzzyTitleScore(a.Title, b.Title)
+		entity := entityOverlapScore(a.Title, b.Title)
+		if entity < 0 {
+			entity = 0
+		}
+		return 0.40*fuzzy + 0.60*entity
+	}
+
+	// Score ALL cross-venue pairs in both directions
+	var allPairs []scored
 	for _, a := range marketsA {
-		var best *models.CanonicalMarket
-		bestScore := -1.0
 		for _, b := range marketsB {
 			if a.VenueID == b.VenueID {
 				continue
 			}
-			fuzzy := fuzzyTitleScore(a.Title, b.Title)
-			entity := entityOverlapScore(a.Title, b.Title)
-			if entity < 0 {
-				entity = 0
-			}
-			// Entity overlap is the primary signal for template markets
-			combined := 0.40*fuzzy + 0.60*entity
-			if combined > bestScore {
-				bestScore = combined
-				best = b
+			s := scorePair(a, b)
+			if s > 0.15 {
+				allPairs = append(allPairs, scored{source: a, candidate: b, score: s})
 			}
 		}
-		if best != nil && bestScore > 0.15 {
-			bestPairs = append(bestPairs, scored{source: a, candidate: best, score: bestScore})
+	}
+	// Also B→A direction so we don't miss pairs where B is the better source
+	for _, b := range marketsB {
+		for _, a := range marketsA {
+			if a.VenueID == b.VenueID {
+				continue
+			}
+			s := scorePair(b, a)
+			if s > 0.15 {
+				allPairs = append(allPairs, scored{source: b, candidate: a, score: s})
+			}
 		}
 	}
 
-	// Sort by score descending
-	sort.Slice(bestPairs, func(i, j int) bool { return bestPairs[i].score > bestPairs[j].score })
+	// Sort by score descending — best pairs first
+	sort.Slice(allPairs, func(i, j int) bool { return allPairs[i].score > allPairs[j].score })
 
-	// Deduplicate: each candidate market appears at most once
-	usedB := map[string]bool{}
+	// Deduplicate: each market appears at most once (in either role)
+	used := map[string]bool{}
 	var result []SearchCandidate
-	for _, p := range bestPairs {
-		key := string(p.candidate.VenueID) + ":" + p.candidate.VenueMarketID
-		if usedB[key] {
+	for _, p := range allPairs {
+		keyS := string(p.source.VenueID) + ":" + p.source.VenueMarketID
+		keyC := string(p.candidate.VenueID) + ":" + p.candidate.VenueMarketID
+		if used[keyS] || used[keyC] {
 			continue
 		}
-		usedB[key] = true
+		used[keyS] = true
+		used[keyC] = true
 		result = append(result, SearchCandidate{Source: p.source, Candidate: p.candidate})
 		if len(result) >= topN {
 			break

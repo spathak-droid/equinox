@@ -120,6 +120,7 @@ document.addEventListener("DOMContentLoaded", function() {
     <div class="head-separator"></div>
     <div class="score-pills">
       <div class="score-pill">Fuzzy <div class="bar-mini"><div class="bar-mini-fill" style="width:{{scoreWidth $p.FuzzyScore}}"></div></div> <strong>{{score $p.FuzzyScore}}</strong></div>
+      {{if gt $p.EmbeddingScore 0.0}}<div class="score-pill">Embed <div class="bar-mini"><div class="bar-mini-fill" style="width:{{scoreWidth $p.EmbeddingScore}}"></div></div> <strong>{{score $p.EmbeddingScore}}</strong></div>{{end}}
       <div class="score-pill">Composite <div class="bar-mini"><div class="bar-mini-fill" style="width:{{scoreWidth $p.CompositeScore}}"></div></div> <strong>{{score $p.CompositeScore}}</strong></div>
     </div>
     <div class="head-spacer"></div>

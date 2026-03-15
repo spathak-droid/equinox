@@ -71,6 +71,7 @@ type MatchResult struct {
 	EntityOverlapScore  float64 // -1 if not computed
 	DateProximityScore  float64 // -1 if not computed
 	PriceProximityScore float64 // -1 if not computed
+	EmbeddingScore      float64 // Qdrant cosine similarity, -1 if not computed
 	DatePenalty         float64 // 0.0 = no penalty, 1.0 = full penalty (dates too far apart)
 	SignatureMatch      bool    // true when Stage 0 signature exact-match was used
 
