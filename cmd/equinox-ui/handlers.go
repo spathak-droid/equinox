@@ -377,7 +377,7 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 	pairedIDs := map[string]bool{}
 
 	if len(ranked) > 0 && cfg.OpenAIAPIKey != "" {
-		verified, err := matcher.VerifyPairsWithLLM(ctx, cfg, ranked)
+		verified, err := matcher.VerifyPairsWithLLM(ctx, cfg, ranked, query)
 		if err != nil {
 			fmt.Printf("[equinox-ui] LLM verification failed: %v\n", err)
 		} else {

@@ -754,7 +754,7 @@
                 '<div class="empty-state">' +
                   '<div class="empty-icon material-icons-round">search_off</div>' +
                   '<div class="empty-title">No equivalent pairs found</div>' +
-                  '<div class="empty-sub">Try a different search query, or adjust MATCH_THRESHOLD / MAX_DATE_DELTA_DAYS to widen the match window.</div>' +
+                  '<div class="empty-sub">Try a different search query.</div>' +
                 '</div>';
             } else {
               loader.style.display = "none";

@@ -190,9 +190,14 @@ func (m *Matcher) FindMatchesRelaxed(results []SearchResult, topN int, minScore 
 // CrossPollinateJaccard finds cross-venue pairs using event-level matching.
 // Markets are grouped into events first, then events are matched across venues.
 // Within matched events, child markets are paired by outcome similarity.
-func (m *Matcher) CrossPollinateJaccard(marketsA, marketsB []*models.CanonicalMarket) []*MatchResult {
+func (m *Matcher) CrossPollinateJaccard(marketsA, marketsB []*models.CanonicalMarket, searchQuery ...string) []*MatchResult {
 	if len(marketsA) == 0 || len(marketsB) == 0 {
 		return nil
+	}
+
+	query := ""
+	if len(searchQuery) > 0 {
+		query = searchQuery[0]
 	}
 
 	// Group markets into events
@@ -202,7 +207,7 @@ func (m *Matcher) CrossPollinateJaccard(marketsA, marketsB []*models.CanonicalMa
 		len(eventsA), len(eventsB))
 
 	// Match events, then pair child markets within matched events
-	eventResults := m.MatchEvents(eventsA, eventsB)
+	eventResults := m.MatchEvents(eventsA, eventsB, query)
 
 	for _, er := range eventResults {
 		fmt.Printf("[matcher] %s event: %q ≈ %q (score=%.3f, %d market pairs)\n",

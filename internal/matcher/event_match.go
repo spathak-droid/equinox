@@ -17,14 +17,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/equinox/config"
 	"github.com/equinox/internal/models"
 )
+
+// reThreshold matches dollar amounts like $150,000 or $71,500.00 or plain numbers like 150000.
+var reThreshold = regexp.MustCompile(`\$?([\d,]+(?:\.\d+)?)`)
+
 
 // eventHTTPClient is used for event-matching LLM requests with a bounded timeout.
 var eventHTTPClient = &http.Client{Timeout: 60 * time.Second}
@@ -50,9 +57,14 @@ type llmEventPair struct {
 
 // MatchEvents compares events across venues using LLM.
 // If no OpenAI key is configured, falls back to exact title match only.
-func (m *Matcher) MatchEvents(eventsA, eventsB []*models.CanonicalEvent) []*EventMatchResult {
+func (m *Matcher) MatchEvents(eventsA, eventsB []*models.CanonicalEvent, searchQuery ...string) []*EventMatchResult {
 	if len(eventsA) == 0 || len(eventsB) == 0 {
 		return nil
+	}
+
+	query := ""
+	if len(searchQuery) > 0 {
+		query = searchQuery[0]
 	}
 
 	var pairs []llmEventPair
@@ -61,7 +73,7 @@ func (m *Matcher) MatchEvents(eventsA, eventsB []*models.CanonicalEvent) []*Even
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		var err error
-		pairs, err = matchEventsViaLLM(ctx, m.cfg, eventsA, eventsB)
+		pairs, err = matchEventsViaLLM(ctx, m.cfg, eventsA, eventsB, query)
 		if err != nil {
 			fmt.Printf("[matcher/event] LLM matching failed: %v, falling back to exact match\n", err)
 			pairs = matchEventsExact(eventsA, eventsB)
@@ -96,18 +108,31 @@ func (m *Matcher) MatchEvents(eventsA, eventsB []*models.CanonicalEvent) []*Even
 }
 
 // matchEventsViaLLM sends event titles to OpenAI and asks which are the same event.
-func matchEventsViaLLM(ctx context.Context, cfg *config.Config, eventsA, eventsB []*models.CanonicalEvent) ([]llmEventPair, error) {
+func matchEventsViaLLM(ctx context.Context, cfg *config.Config, eventsA, eventsB []*models.CanonicalEvent, searchQuery ...string) ([]llmEventPair, error) {
+	query := ""
+	if len(searchQuery) > 0 {
+		query = searchQuery[0]
+	}
+
 	// Build the prompt
 	var sb strings.Builder
 	sb.WriteString("You are matching prediction market events across two different venues.\n")
 	sb.WriteString("Given events from Venue A and Venue B, identify which events refer to the EXACT SAME real-world event.\n\n")
+	if query != "" {
+		sb.WriteString(fmt.Sprintf("USER'S SEARCH QUERY: %q\n", query))
+		sb.WriteString("IMPORTANT: Only match events that are RELEVANT to the user's search query. Ignore events about unrelated topics.\n\n")
+	}
 	sb.WriteString("CRITICAL RULES:\n")
 	sb.WriteString("- Only match events that are about the EXACT same thing\n")
 	sb.WriteString("- 'Group E' is NOT 'Group F' — different groups are different events\n")
 	sb.WriteString("- 'Qualifiers' is NOT 'Winner' — qualifying vs winning are different events\n")
 	sb.WriteString("- 'Semifinals' is NOT 'Finals' — different stages are different events\n")
 	sb.WriteString("- Ignore minor phrasing differences like '2026 FIFA World Cup Winner' vs 'Men's World Cup winner'\n")
-	sb.WriteString("- Each event can match at most ONE event from the other venue\n\n")
+	sb.WriteString("- Each event can match at most ONE event from the other venue\n")
+	if query != "" {
+		sb.WriteString(fmt.Sprintf("- REJECT events not related to %q\n", query))
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("Venue A events:\n")
 	for i, ev := range eventsA {
@@ -232,8 +257,37 @@ func matchEventsExact(eventsA, eventsB []*models.CanonicalEvent) []llmEventPair 
 	return pairs
 }
 
-// pairChildMarkets pairs markets within two matched events by subtitle similarity.
-// Runs full compare() on each pair so all component scores (fuzzy, entity, date, etc.) are populated.
+// extractNumericThreshold pulls the largest dollar/number value from a title or subtitle.
+// e.g. "Will Bitcoin reach $150,000 in March?" → 150000
+//      "$71,500 or above" → 71500
+// Returns 0 if no number found.
+func extractNumericThreshold(s string) float64 {
+	matches := reThreshold.FindAllStringSubmatch(s, -1)
+	var best float64
+	for _, m := range matches {
+		raw := strings.ReplaceAll(m[1], ",", "")
+		v, err := strconv.ParseFloat(raw, 64)
+		if err == nil && v > best {
+			best = v
+		}
+	}
+	return best
+}
+
+// thresholdsClose returns true if two thresholds are within 1% of each other.
+func thresholdsClose(a, b float64) bool {
+	if a == 0 || b == 0 {
+		return false
+	}
+	ratio := a / b
+	return ratio >= 0.99 && ratio <= 1.01
+}
+
+// pairChildMarkets pairs markets within two matched events.
+// Uses three strategies in order:
+//  1. Exact threshold match (e.g. both mention $80,000)
+//  2. Fuzzy subtitle/title match (lowered to 0.3 since events are LLM-verified)
+//  3. For single-market events, direct pair
 func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResult {
 	// If either event has only one market, pair directly via compare()
 	if len(evA.Markets) == 1 && len(evB.Markets) == 1 {
@@ -247,39 +301,70 @@ func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResu
 		return []*MatchResult{r}
 	}
 
-	// For multi-market events, find best subtitle matches then run compare()
+	// Build threshold index for each market
+	type marketThreshold struct {
+		market    *models.CanonicalMarket
+		threshold float64
+		text      string // subtitle or title used for fuzzy
+	}
+
+	extractMT := func(mkt *models.CanonicalMarket) marketThreshold {
+		text := mkt.Subtitle
+		if text == "" {
+			text = mkt.Title
+		}
+		// Try subtitle first, then title for threshold
+		thr := extractNumericThreshold(text)
+		if thr == 0 {
+			thr = extractNumericThreshold(mkt.Title)
+		}
+		return marketThreshold{market: mkt, threshold: thr, text: text}
+	}
+
+	mtsA := make([]marketThreshold, len(evA.Markets))
+	mtsB := make([]marketThreshold, len(evB.Markets))
+	for i, a := range evA.Markets {
+		mtsA[i] = extractMT(a)
+	}
+	for i, b := range evB.Markets {
+		mtsB[i] = extractMT(b)
+	}
+
 	type scored struct {
 		a, b     *models.CanonicalMarket
 		subScore float64
+		method   string
 	}
 	var candidates []scored
 
-	for _, a := range evA.Markets {
-		for _, b := range evB.Markets {
-			subA := a.Subtitle
-			subB := b.Subtitle
-			if subA == "" {
-				subA = a.Title
-			}
-			if subB == "" {
-				subB = b.Title
-			}
-
-			// Exact subtitle match
-			if strings.EqualFold(strings.TrimSpace(subA), strings.TrimSpace(subB)) {
-				candidates = append(candidates, scored{a: a, b: b, subScore: 1.0})
+	for _, a := range mtsA {
+		for _, b := range mtsB {
+			// Strategy 1: exact threshold match (highest priority)
+			if a.threshold > 0 && thresholdsClose(a.threshold, b.threshold) {
+				candidates = append(candidates, scored{
+					a: a.market, b: b.market,
+					subScore: 0.95 + 0.05*(1.0-math.Abs(a.threshold-b.threshold)/math.Max(a.threshold, 1)),
+					method:   fmt.Sprintf("threshold=$%.0f≈$%.0f", a.threshold, b.threshold),
+				})
 				continue
 			}
 
-			// Fuzzy subtitle match as fallback
-			fs := fuzzyTitleScore(subA, subB)
-			if fs >= 0.5 {
-				candidates = append(candidates, scored{a: a, b: b, subScore: fs})
+			// Strategy 2: exact subtitle match
+			if strings.EqualFold(strings.TrimSpace(a.text), strings.TrimSpace(b.text)) {
+				candidates = append(candidates, scored{a: a.market, b: b.market, subScore: 1.0, method: "exact-subtitle"})
+				continue
+			}
+
+			// Strategy 3: fuzzy match with lowered threshold (0.3 instead of 0.5)
+			// Events are already LLM-verified, so we can be more permissive
+			fs := fuzzyTitleScore(a.text, b.text)
+			if fs >= 0.3 {
+				candidates = append(candidates, scored{a: a.market, b: b.market, subScore: fs, method: "fuzzy"})
 			}
 		}
 	}
 
-	// Sort by subtitle score descending
+	// Sort by score descending
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].subScore > candidates[j].subScore })
 
 	// Deduplicate: each market in at most one pair
@@ -298,10 +383,16 @@ func (m *Matcher) pairChildMarkets(evA, evB *models.CanonicalEvent) []*MatchResu
 		// Run full compare() to populate all component scores
 		r := m.compare(c.a, c.b)
 		r.Confidence = ConfidenceMatch // events already matched by LLM
-		r.Explanation = fmt.Sprintf("Event-paired (%q ≈ %q, sub=%.2f) | %s",
-			c.a.Subtitle, c.b.Subtitle, c.subScore, r.Explanation)
+		if r.CompositeScore < 0.4 {
+			r.CompositeScore = 0.4
+		}
+		r.Explanation = fmt.Sprintf("Event-paired [%s] (%q ≈ %q, sub=%.2f) | %s",
+			c.method, c.a.Subtitle, c.b.Subtitle, c.subScore, r.Explanation)
 		pairs = append(pairs, r)
 	}
+
+	fmt.Printf("[matcher/child] %q × %q → %d candidates, %d pairs (from %d×%d markets)\n",
+		evA.EventTitle, evB.EventTitle, len(candidates), len(pairs), len(evA.Markets), len(evB.Markets))
 
 	return pairs
 }

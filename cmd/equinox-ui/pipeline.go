@@ -47,94 +47,95 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 	kalshiCursor := ""
 	polyDone := false
 	kalshiDone := false
-	page := 0
-	stagnationPages := 0
+	step := 0
+	stagnationSteps := 0
 	var pairs []*matcher.MatchResult
 
-	pageLimit := maxPages
+	// Total fetch steps: each step fetches ONE venue page (alternating).
+	// Default 6 steps = ~3 pages per venue; deep = 16 steps = ~8 pages per venue.
+	stepLimit := maxPages * 2
 	if deepSearch {
-		pageLimit = maxPagesDeep
+		stepLimit = maxPagesDeep * 2
 	}
-	// Default mode stops after first non-empty result set; deep mode keeps
-	// paginating to expand the market pool and potentially find better matches.
-	for (deepSearch || len(pairs) == 0) && !(polyDone && kalshiDone) && page < pageLimit {
-		page++
-		emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching page %d for \"%s\"...", page, query)})
 
-		var wg sync.WaitGroup
-		var polyRaw, kalshiRaw []*venues.RawMarket
-		var nextPolyOffset int
-		var nextKalshiCursor string
-
-		if !polyDone {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				var err error
-				polyRaw, nextPolyOffset, err = polyClient.FetchMarketsByQueryPaged(ctx, query, polyOffset)
-				if err != nil {
-					fmt.Printf("[equinox-ui] WARNING: polymarket page %d: %v\n", page, err)
-				}
-				if nextPolyOffset == 0 {
-					polyDone = true
-				}
-			}()
+	// Helper: fetch one page from a venue, normalize, deduplicate into the pool.
+	fetchPoly := func() int {
+		if polyDone {
+			return 0
 		}
-		if !kalshiDone {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				var err error
-				kalshiRaw, nextKalshiCursor, err = kalshiClient.FetchMarketsByQueryPaged(ctx, query, kalshiCursor, 100)
-				if err != nil {
-					fmt.Printf("[equinox-ui] WARNING: kalshi page %d: %v\n", page, err)
-				}
-				if nextKalshiCursor == "" {
-					kalshiDone = true
-				}
-			}()
+		raw, nextOffset, err := polyClient.FetchMarketsByQueryPaged(ctx, query, polyOffset)
+		if err != nil {
+			fmt.Printf("[equinox-ui] WARNING: polymarket fetch: %v\n", err)
 		}
-		wg.Wait()
-
-		polyOffset = nextPolyOffset
-		kalshiCursor = nextKalshiCursor
-
-		// Normalize and deduplicate new markets
-		newPoly, _ := norm.Normalize(ctx, polyRaw)
-		newKalshi, _ := norm.Normalize(ctx, kalshiRaw)
-		addedPoly := 0
-		addedKalshi := 0
-		for _, mm := range newPoly {
+		polyOffset = nextOffset
+		if nextOffset == 0 {
+			polyDone = true
+		}
+		normalized, _ := norm.Normalize(ctx, raw)
+		added := 0
+		for _, mm := range normalized {
 			if !seenPoly[mm.VenueMarketID] {
 				seenPoly[mm.VenueMarketID] = true
 				allPolyMarkets = append(allPolyMarkets, mm)
-				addedPoly++
+				added++
 			}
 		}
-		for _, mm := range newKalshi {
+		// If API returned results but all were duplicates, this venue is exhausted
+		if added == 0 {
+			polyDone = true
+		}
+		return added
+	}
+	fetchKalshi := func() int {
+		if kalshiDone {
+			return 0
+		}
+		raw, nextCursor, err := kalshiClient.FetchMarketsByQueryPaged(ctx, query, kalshiCursor, 100)
+		if err != nil {
+			fmt.Printf("[equinox-ui] WARNING: kalshi fetch: %v\n", err)
+		}
+		kalshiCursor = nextCursor
+		if nextCursor == "" {
+			kalshiDone = true
+		}
+		normalized, _ := norm.Normalize(ctx, raw)
+		added := 0
+		for _, mm := range normalized {
 			if !seenKalshi[mm.VenueMarketID] {
 				seenKalshi[mm.VenueMarketID] = true
 				allKalshiMarkets = append(allKalshiMarkets, mm)
-				addedKalshi++
+				added++
 			}
 		}
+		if added == 0 {
+			kalshiDone = true
+		}
+		return added
+	}
 
-		emit(progressEvent{Type: "result",
-			Msg:   fmt.Sprintf("Pool: %d poly, %d kalshi markets", len(allPolyMarkets), len(allKalshiMarkets)),
-			Count: len(allPolyMarkets) + len(allKalshiMarkets),
-		})
+	// Step 1: fetch both venues page 1 in parallel
+	emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching page 1 for \"%s\"...", query)})
+	{
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); fetchPoly() }()
+		go func() { defer wg.Done(); fetchKalshi() }()
+		wg.Wait()
+	}
+	step = 2 // consumed 2 steps (one per venue)
 
-		// Cross-pollinate on accumulated pool
-		pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets)
-		fmt.Printf("[equinox-ui] Page %d: pool poly=%d kalshi=%d → %d pairs\n",
-			page, len(allPolyMarkets), len(allKalshiMarkets), len(pairs))
+	emit(progressEvent{Type: "result",
+		Msg:   fmt.Sprintf("Pool: %d poly, %d kalshi markets", len(allPolyMarkets), len(allKalshiMarkets)),
+		Count: len(allPolyMarkets) + len(allKalshiMarkets),
+	})
 
-		// Stream any newly discovered pairs
-		for _, p := range pairs {
-			pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID
-			if emittedPairs[pairKey] {
-				continue
-			}
+	// Compare initial pool
+	pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets, query)
+	fmt.Printf("[equinox-ui] Step 1+2: pool poly=%d kalshi=%d → %d pairs\n",
+		len(allPolyMarkets), len(allKalshiMarkets), len(pairs))
+	for _, p := range pairs {
+		pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID
+		if !emittedPairs[pairKey] {
 			emittedPairs[pairKey] = true
 			pairIndex++
 			if pairIndex <= maxDisplayPairs {
@@ -142,19 +143,64 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 				emit(progressEvent{Type: "pair", Pair: &pv, Index: pairIndex})
 			}
 		}
+	}
 
-		// Deep mode can hit venue-side pagination loops that return the same set.
-		// Stop after repeated no-growth pages and switch to query-variant expansion.
-		if deepSearch {
-			if addedPoly == 0 && addedKalshi == 0 {
-				stagnationPages++
-			} else {
-				stagnationPages = 0
+	// Alternating pagination: poly page 2, then kalshi page 2, poly page 3, ...
+	// Each new page from one venue is compared against ALL accumulated from the other.
+	fetchPolyNext := true // start with poly page 2
+	for (deepSearch || len(pairs) == 0) && !(polyDone && kalshiDone) && step < stepLimit {
+		step++
+		var added int
+		var venueName string
+
+		if fetchPolyNext && !polyDone {
+			venueName = "polymarket"
+			emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching %s next page...", venueName)})
+			added = fetchPoly()
+		} else if !kalshiDone {
+			venueName = "kalshi"
+			emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching %s next page...", venueName)})
+			added = fetchKalshi()
+		} else if !polyDone {
+			venueName = "polymarket"
+			emit(progressEvent{Type: "step", Msg: fmt.Sprintf("Fetching %s next page...", venueName)})
+			added = fetchPoly()
+		} else {
+			break
+		}
+		fetchPolyNext = !fetchPolyNext // alternate
+
+		emit(progressEvent{Type: "result",
+			Msg:   fmt.Sprintf("Pool: %d poly, %d kalshi markets (+%d %s)", len(allPolyMarkets), len(allKalshiMarkets), added, venueName),
+			Count: len(allPolyMarkets) + len(allKalshiMarkets),
+		})
+
+		// Re-match full accumulated pool
+		pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets, query)
+		fmt.Printf("[equinox-ui] Step %d (%s): pool poly=%d kalshi=%d → %d pairs\n",
+			step, venueName, len(allPolyMarkets), len(allKalshiMarkets), len(pairs))
+
+		for _, p := range pairs {
+			pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID
+			if !emittedPairs[pairKey] {
+				emittedPairs[pairKey] = true
+				pairIndex++
+				if pairIndex <= maxDisplayPairs {
+					pv := matchToPairView(cfg, r, p)
+					emit(progressEvent{Type: "pair", Pair: &pv, Index: pairIndex})
+				}
 			}
-			if stagnationPages >= 2 {
-				emit(progressEvent{Type: "step", Msg: "No new markets on additional pages; widening search terms..."})
-				break
-			}
+		}
+
+		// Stagnation detection
+		if added == 0 {
+			stagnationSteps++
+		} else {
+			stagnationSteps = 0
+		}
+		if deepSearch && stagnationSteps >= 3 {
+			emit(progressEvent{Type: "step", Msg: "No new markets on additional pages; widening search terms..."})
+			break
 		}
 	}
 
@@ -194,7 +240,7 @@ func runSearchPipelineWithProgress(cfg *config.Config, kalshiClient *kalshi.Clie
 				continue
 			}
 
-			pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets)
+			pairs = m.CrossPollinateJaccard(allPolyMarkets, allKalshiMarkets, query)
 			// Stream newly discovered pairs from variant expansion
 			for _, p := range pairs {
 				pairKey := p.MarketA.VenueMarketID + "|" + p.MarketB.VenueMarketID

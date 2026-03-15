@@ -46,7 +46,7 @@ type llmPairVerdict struct {
 //
 // Each candidate is a pair of (source market, candidate market) from different venues.
 // The LLM sees both titles and must decide if they resolve to the same outcome.
-func VerifyPairsWithLLM(ctx context.Context, cfg *config.Config, candidates []SearchCandidate) ([]LLMVerifiedPair, error) {
+func VerifyPairsWithLLM(ctx context.Context, cfg *config.Config, candidates []SearchCandidate, searchQuery ...string) ([]LLMVerifiedPair, error) {
 	if cfg.OpenAIAPIKey == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
@@ -61,15 +61,28 @@ func VerifyPairsWithLLM(ctx context.Context, cfg *config.Config, candidates []Se
 
 	// Build the prompt — kept generic, no venue-specific hardcoding.
 	// Title normalization happens in cleanTitleForLLM() before the LLM sees them.
+	// Extract optional search query for relevance filtering
+	query := ""
+	if len(searchQuery) > 0 {
+		query = searchQuery[0]
+	}
+
 	var sb strings.Builder
 	sb.WriteString("You are verifying whether prediction market questions from two different venues are about the SAME SUBJECT and EVENT.\n\n")
 	sb.WriteString("Two markets match if they are about the same person/entity doing the same thing, even if timeframes differ slightly.\n")
 	sb.WriteString("The goal is to help users compare prices across venues for related markets.\n\n")
+	if query != "" {
+		sb.WriteString(fmt.Sprintf("USER'S SEARCH QUERY: %q\n", query))
+		sb.WriteString("IMPORTANT: Only match pairs that are RELEVANT to the user's search query. Reject pairs about unrelated topics.\n\n")
+	}
 	sb.WriteString("NO MATCH when:\n")
 	sb.WriteString("- Completely different subjects: 'Person A wins' ≠ 'Person B wins'\n")
 	sb.WriteString("- Fundamentally different actions: 'win election' ≠ 'be arrested', 'win' ≠ 'host'\n")
-	sb.WriteString("- Different events: 'NBA Finals' ≠ 'NFL Super Bowl'\n\n")
-	sb.WriteString("MATCH when:\n")
+	sb.WriteString("- Different events: 'NBA Finals' ≠ 'NFL Super Bowl'\n")
+	if query != "" {
+		sb.WriteString(fmt.Sprintf("- Not relevant to the user's search %q\n", query))
+	}
+	sb.WriteString("\nMATCH when:\n")
 	sb.WriteString("- Same subject doing the same thing, even with slightly different timeframes ('by March' ≈ 'before May')\n")
 	sb.WriteString("- Minor phrasing differences: 'Will X win?' ≈ 'X to win' ≈ 'Is X going to win?'\n")
 	sb.WriteString("- Equivalent terms: 'out as' ≈ 'leaves', 'Finals' ≈ 'Championship'\n")
