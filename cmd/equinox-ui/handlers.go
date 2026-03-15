@@ -391,7 +391,7 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 					MarketA:        vp.MarketA,
 					MarketB:        vp.MarketB,
 					Confidence:     matcher.ConfidenceMatch,
-					CompositeScore: 1.0,
+					CompositeScore: embScore,
 					EmbeddingScore: embScore,
 					Explanation:    "LLM verified: " + vp.Reason,
 				}
