@@ -510,7 +510,7 @@
   }
 
   function fmtPct(f) { return (f * 100).toFixed(1) + "%"; }
-  function fmtScore(f) { return f.toFixed(3); }
+  function fmtScore(f) { return (f * 100).toFixed(0) + "%"; }
   function fmtScoreWidth(f) { return (f * 100).toFixed(1) + "%"; }
   function fmtUsd(f) {
     if (!f) return "--";

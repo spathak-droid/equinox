@@ -382,17 +382,24 @@ func runQdrantSearch(ctx context.Context, cfg *config.Config, kalshiClient *kals
 			fmt.Printf("[equinox-ui] LLM verification failed: %v\n", err)
 		} else {
 			for _, vp := range verified {
-				// Look up Qdrant cosine similarity for each market in the pair
+				// LLM-verified pairs get high base confidence (0.90).
+				// Qdrant query-relevance scores are used only as a tiebreaker
+				// for ranking — they measure query↔market similarity, not
+				// market↔market similarity.
 				scoreA := qdrantScores[string(vp.MarketA.VenueID)+":"+vp.MarketA.VenueMarketID]
 				scoreB := qdrantScores[string(vp.MarketB.VenueID)+":"+vp.MarketB.VenueMarketID]
-				embScore := (scoreA + scoreB) / 2.0
-				// Wrap in MatchResult for the view pipeline
+				queryRelevance := (scoreA + scoreB) / 2.0
+				// Base 0.90 for LLM verification + up to 0.10 from query relevance
+				confidence := 0.90 + 0.10*queryRelevance
+				if confidence > 1.0 {
+					confidence = 1.0
+				}
 				mr := &matcher.MatchResult{
 					MarketA:        vp.MarketA,
 					MarketB:        vp.MarketB,
 					Confidence:     matcher.ConfidenceMatch,
-					CompositeScore: embScore,
-					EmbeddingScore: embScore,
+					CompositeScore: confidence,
+					EmbeddingScore: confidence,
 					Explanation:    "LLM verified: " + vp.Reason,
 				}
 				pv := matchToPairView(cfg, rtr, mr)

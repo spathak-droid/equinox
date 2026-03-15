@@ -31,7 +31,7 @@ var pageTmpl = template.Must(template.New("page").Funcs(template.FuncMap{
 		}
 		return fmt.Sprintf("$%.0f", f)
 	},
-	"score":      func(f float64) string { return fmt.Sprintf("%.3f", f) },
+	"score":      func(f float64) string { return fmt.Sprintf("%.0f%%", f*100) },
 	"scoreWidth": func(f float64) string { return fmt.Sprintf("%.1f%%", f*100) },
 	"confClass": func(c string) string {
 		switch c {
