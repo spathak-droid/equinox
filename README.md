@@ -6,6 +6,8 @@ A working prototype that detects equivalent markets across Polymarket and Kalshi
 normalizes them into a shared internal representation, and simulates routing decisions
 for hypothetical trades. This is an infrastructure prototype, not a trading product.
 
+**Live Demo:** <https://equinox-production-c5f2.up.railway.app/>
+
 ---
 
 ## Quick Start
